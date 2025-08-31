@@ -34,6 +34,31 @@ router.post('/', async (req, res) => {
   const requestId = `req_${Math.random().toString(36).substr(2, 9)}`;
   console.log(`\n🚀 [${requestId}] Webhook received from ${req.headers['user-agent'] || 'unknown'}`);
 
+  // 🔒 API Key Authentication - REQUIRED (Header, Bearer Token, or Query Parameter)
+  const providedApiKey = req.headers['x-api-key'] || 
+                        req.headers['authorization']?.replace('Bearer ', '') ||
+                        req.query.api_key ||
+                        req.query.key;
+  const expectedApiKey = process.env.API_KEY_WEBHOOK;
+  
+  if (!expectedApiKey) {
+    console.error(`❌ [${requestId}] API_KEY_WEBHOOK not configured in environment`);
+    return res.status(500).json({ 
+      error: 'WEBHOOK_MISCONFIGURED',
+      message: 'Webhook authentication not configured' 
+    });
+  }
+  
+  if (!providedApiKey || providedApiKey !== expectedApiKey) {
+    console.warn(`🚫 [${requestId}] Unauthorized webhook attempt from ${req.ip} - Invalid API key`);
+    return res.status(401).json({ 
+      error: 'UNAUTHORIZED',
+      message: 'Valid API key required. Provide via X-API-Key header, Authorization Bearer token, or ?api_key= query parameter.' 
+    });
+  }
+  
+  console.log(`🔐 [${requestId}] API key authenticated successfully`);
+
   // TO DO ASAP - Implement supporting Clapps WhatsApp
 
   try {
