@@ -1,0 +1,23 @@
+{
+  "name": "processRequest",
+  "description": "Execute image processing with Google Gemini to generate the final result. Use this after newRequest to deliver professional image results. If request contains multiple images, Gemini will combine them into one cohesive result. Processing takes 30-60 seconds.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string", 
+        "description": "The unique ID of the request to process."
+      },
+      "finalPrompt": {
+        "type": "string",
+        "description": "Optional final prompt or specific instructions for this processing iteration. This will be combined with all previous instructions. Examples: 'Generate the final result', 'Apply all changes we discussed', 'Create the professional version'. Use empty string if no additional prompt."
+      }
+    },
+    "required": [
+      "requestId",
+      "finalPrompt"
+    ],
+    "additionalProperties": false
+  }
+}

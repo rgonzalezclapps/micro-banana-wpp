@@ -1,0 +1,38 @@
+{
+  "name": "newRequest",
+  "description": "Create a single request for image processing using Google Gemini. When user provides multiple images for the same task, include ALL file IDs in initialImages array to process them together in one cohesive result. Use this tool once per user request, not multiple times.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "systemPrompt": {
+        "type": "string", 
+        "description": "System instruction for Gemini processing. Must emphasize combining all images into one result and generating visual content. Examples: 'Create a professional product photograph combining all input images into one cohesive commercial scene with studio lighting', 'Generate a single high-quality image that incorporates all requested elements'."
+      },
+      "initialImages": {
+        "type": "array",
+        "description": "Array containing ALL file IDs from user's recent images for processing together. Extract fileStorage.fileId from recent messages with successful media storage. Include all relevant images in this single array to process them as one cohesive request. Use empty array only for text-to-image generation.",
+        "items": {
+          "type": "string", 
+          "description": "File ID from fileStorage.fileId field (32-character hex string like '6ed6b3dd80fa9e0dbbe5219308cee028')"
+        }
+      },
+      "requestType": {
+        "type": "string",
+        "description": "Type of request being created to categorize the processing workflow.",
+        "enum": [
+          "image_processing",
+          "photo_product", 
+          "image_editing",
+          "custom"
+        ]
+      }
+    },
+    "required": [
+      "systemPrompt",
+      "initialImages", 
+      "requestType"
+    ],
+    "additionalProperties": false
+  }
+}

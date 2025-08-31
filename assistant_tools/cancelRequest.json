@@ -1,0 +1,18 @@
+{
+  "name": "cancelRequest",
+  "description": "Cancel an active request that is no longer needed. Use this if the user wants to stop a request, start over, or if the request is no longer relevant to the conversation.",
+  "strict": true,
+  "parameters": {
+    "type": "object", 
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "The unique ID of the request to cancel."
+      }
+    },
+    "required": [
+      "requestId"
+    ],
+    "additionalProperties": false
+  }
+}

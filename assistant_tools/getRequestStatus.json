@@ -1,0 +1,18 @@
+{
+  "name": "getRequestStatus",
+  "description": "Get the current status and details of a specific request. Use this to check if a request is active, processing, completed, or failed, and to retrieve processing history and results.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "The unique ID of the request to get status for."
+      }
+    },
+    "required": [
+      "requestId"
+    ],
+    "additionalProperties": false
+  }
+}

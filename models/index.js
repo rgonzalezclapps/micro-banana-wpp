@@ -33,4 +33,8 @@ Object.keys(db).forEach(modelName => {
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 
+// MongoDB models (Mongoose) - Added for request processing system
+db.Conversation = require('./Conversation');
+db.Request = require('./Request');
+
 module.exports = db;

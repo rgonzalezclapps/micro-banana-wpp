@@ -91,6 +91,58 @@ const MessageSchema = new Schema({
     type: String,
     enum: ['user', 'operator', 'specialist', 'system'],
     default: 'user'
+  },
+  // File storage result for media messages
+  fileStorage: {
+    status: {
+      type: String,
+      enum: ['pending', 'success', 'error', 'not_applicable'],
+      default: 'not_applicable'
+    },
+    fileId: {
+      type: String,
+      required: false // Crypto-secure file ID from our storage server
+    },
+    filename: {
+      type: String,
+      required: false // Generated secure filename
+    },
+    originalFilename: {
+      type: String,
+      required: false // Original filename if available
+    },
+    fileSize: {
+      type: Number,
+      required: false // File size in bytes
+    },
+    fileSizeHuman: {
+      type: String,
+      required: false // Human-readable file size
+    },
+    contentType: {
+      type: String,
+      required: false // MIME type
+    },
+    downloadUrl: {
+      type: String,
+      required: false // URL to access file from our storage
+    },
+    uploadDate: {
+      type: Date,
+      required: false // When file was successfully stored
+    },
+    errorCode: {
+      type: String,
+      required: false // Error code if storage failed
+    },
+    errorMessage: {
+      type: String,
+      required: false // Error message if storage failed
+    },
+    requestId: {
+      type: String,
+      required: false // Request tracking ID
+    }
   }
 });
 

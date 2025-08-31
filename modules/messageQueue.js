@@ -4,7 +4,7 @@ const openAIIntegration = require('./openaiIntegration');
 const audioTranscriber = require('./audioTranscriber');
 const { chunkMessage } = require('../utils/messageUtils');
 const moment = require('moment-timezone');
-const { sendUltraMsg } = require('../services/ultramsgService');
+const { sendUltraMsg, sendUltraMsgSmart } = require('../services/ultramsgService');
 const { sendWhatsAppBusinessMessage } = require('../services/whatsappBusinessService');
 const { transcribeAudioWithTimeout } = require('./audioTranscriber');
 const { redisClient } = require('../database');
@@ -135,16 +135,28 @@ class MessageQueue {
           }
         }
         
-        // Ahora transcribir con la URL obtenida (no pasar messageId para evitar segunda descarga)
+        // Transcribir usando nuestro nuevo sistema de almacenamiento seguro
+        // Para WhatsApp Factory, necesitamos crear un objeto de mensaje temporal con la URL legacy
+        const messageDataForTranscription = {
+          ...placeholder,
+          // Si no hay fileStorage exitoso, usar fallback legacy
+          media: audioUrl || placeholder.ultraMsgData.media
+        };
+        
         transcription = await transcribeAudioWithTimeout(
-          audioUrl,
+          messageDataForTranscription,
           agent,
           placeholder.ultraMsgData.media,
-          null // No pasar messageId para evitar duplicar descarga
+          placeholder.ultraMsgData.id
         );
       } else {
-        // Para otros proveedores (UltraMessage), usar el método original
-        transcription = await transcribeAudioWithTimeout(placeholder.ultraMsgData.media);
+        // Para otros proveedores (UltraMessage), usar el método actualizado
+        transcription = await transcribeAudioWithTimeout(
+          placeholder, // Pasar el mensaje completo con información de fileStorage
+          null, // No agent needed for UltraMsg
+          null, // No mediaData adicional
+          placeholder.ultraMsgData.id // messageId para tracking
+        );
       }
 
       if (transcription && transcription.status === 'completed') {
@@ -314,7 +326,14 @@ class MessageQueue {
           }
         }
 
-        console.log('msg.message_id', msg);
+        // 🔧 DIAGNOSTIC LOG: Check file storage integration  
+        console.log('🔍 DIAGNOSTIC - Message processing for OpenAI:', {
+          messageId: msg.ultraMsgData.id,
+          hasFileStorage: !!msg.fileStorage,
+          fileStorageStatus: msg.fileStorage?.status || 'none',
+          fileStorageFileId: msg.fileStorage?.fileId || 'none',
+          mediaType: msg.ultraMsgData.type
+        });
 
         return {
           timestamp: moment(msg.timestamp).tz('America/Argentina/Buenos_Aires').format(),
@@ -324,7 +343,9 @@ class MessageQueue {
           quoted_message: msg.ultraMsgData.quotedMsg ? msg.ultraMsgData.quotedMsg : null,
           media_name: msg.media?.filename || null,
           sender: msg.sender,
-          message_id: msg.ultraMsgData.id
+          message_id: msg.ultraMsgData.id,
+          // 🔧 CRITICAL FIX: Include fileStorage information for AI tools
+          fileStorage: msg.fileStorage || { status: 'not_applicable' }
         };
       });
 
@@ -337,7 +358,12 @@ class MessageQueue {
         })
       };
 
-      console.log('openAiObject', openAiObject);
+      // 🧹 CLEAN LOG: Avoid logging large objects with potential blob data
+      console.log('📤 OpenAI object prepared:', {
+        messageCount: openAiMessages.length,
+        participantName: conversation.participantName,
+        hasSystemMessage: !!openAiObject.system_message
+      });
 
       // Send queue to OpenAI
       await openAIIntegration.addMessageToThread(conversation.threadId, JSON.stringify(openAiObject));
@@ -386,8 +412,15 @@ class MessageQueue {
           console.error('Error saving conversation:', error);
         }
 
-        console.log('result', result);
-        console.log('result.messagesToQuote', result.messagesToQuote);
+        // 🧹 CLEAN LOG: Avoid logging full result object with potential blob data
+        console.log('✅ AI processing completed:', {
+          type: result.type,
+          hasContent: !!result.content,
+          contentLength: result.content?.length || 0,
+          hasToolResults: !!(result.toolResults && result.toolResults.length > 0),
+          toolResultCount: result.toolResults?.length || 0,
+          messagesToQuoteCount: result.messagesToQuote?.length || 0
+        });
 
         // Send the message via appropriate service based on agent type
         if (response.recipient === 'user') {
@@ -429,14 +462,37 @@ class MessageQueue {
               // Usar UltraMessage (comportamiento original)
               
               if (result.messagesToQuote && result.messagesToQuote.length > 0) {
+                // 🔧 SMART QUOTED RESPONSE: Handle images in quoted responses
+                const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => 
+                  tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
+                );
+
                 const uniqueMessagesToQuote = [...new Set(result.messagesToQuote)];
                 for (let i = 0; i < uniqueMessagesToQuote.length; i++) {
                   const messageToQuote = uniqueMessagesToQuote[i];
                   if (messageToQuote !== undefined) {
                     const isLastMessage = i === uniqueMessagesToQuote.length - 1;
-                    const messageContent = isLastMessage ? response.message : "☝🏽";
                     
-                    messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, messageContent, messageToQuote);
+                    if (isLastMessage && hasGeneratedImages) {
+                      // Last message with images - use smart sending
+                      const imageToolResult = result.toolResults.find(tool => 
+                        tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
+                      );
+                      
+                      if (imageToolResult && imageToolResult.result) {
+                        const smartContent = {
+                          textResponse: response.message,
+                          generatedImages: imageToolResult.result.generatedImages
+                        };
+                        messageResponse = await sendUltraMsgSmart(agent, conversation.phoneNumber, smartContent, messageToQuote);
+                      } else {
+                        messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message, messageToQuote);
+                      }
+                    } else {
+                      // Regular quoted message
+                      const messageContent = isLastMessage ? response.message : "☝🏽";
+                      messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, messageContent, messageToQuote);
+                    }
                     
                     if (!isLastMessage) {
                       await new Promise(resolve => setTimeout(resolve, 500));
@@ -444,8 +500,35 @@ class MessageQueue {
                   }
                 }
               } else {
-                // If there are no messages to quote, send the response directly
-                messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                // 🔧 SMART RESPONSE ROUTING: Check if response contains generated images
+                const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => 
+                  tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
+                );
+
+                if (hasGeneratedImages) {
+                  console.log(`🖼️ [ULTRAMSG] Response contains generated images, using smart sending`);
+                  
+                  // Extract image content from tool results
+                  const imageToolResult = result.toolResults.find(tool => 
+                    tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
+                  );
+                  
+                  if (imageToolResult && imageToolResult.result) {
+                    const smartContent = {
+                      textResponse: response.message,
+                      generatedImages: imageToolResult.result.generatedImages
+                    };
+                    
+                    messageResponse = await sendUltraMsgSmart(agent, conversation.phoneNumber, smartContent);
+                  } else {
+                    // Fallback to regular text if image extraction fails
+                    messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                  }
+                } else {
+                  // No images, send text normally
+                  console.log(`📝 [ULTRAMSG] Text-only response, using regular sending`);
+                  messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                }
               }
 
               if (messageResponse && messageResponse.data) {

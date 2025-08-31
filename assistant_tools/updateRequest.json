@@ -1,0 +1,32 @@
+{
+  "name": "updateRequest", 
+  "description": "Add new images or instructions to an existing request for iterative refinement. Use this to enhance or modify the processing requirements of a request that's already been created.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "The unique ID of the request to update, returned from newRequest or previous tool calls."
+      },
+      "newImages": {
+        "type": "array", 
+        "description": "Array of new file IDs to add. CRITICAL: Use fileStorage.fileId from recent messages with successful media storage (32-char hex), NOT message_id. Look for fileStorage.status='success' and extract fileStorage.fileId. Empty array if no new images.",
+        "items": {
+          "type": "string",
+          "description": "Crypto-secure file ID from fileStorage.fileId field (example: '6a8b31e539d4518206ecc11834a250a3')"
+        }
+      },
+      "instructions": {
+        "type": "string", 
+        "description": "Additional instructions or modifications for the image processing. Examples: 'Make the background more blurred', 'Change lighting to be more dramatic', 'Add text overlay saying Welcome', 'Create 3 variations'. Use empty string if no new instructions."
+      }
+    },
+    "required": [
+      "requestId",
+      "newImages",
+      "instructions"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -200,40 +200,85 @@ async function transcribeAudio(url, agent = null, mediaInfo = null, messageId = 
 
 /**
  * Función de transcripción con timeout para compatibilidad con messageQueue
- * @param {string|Object} mediaInfo - URL del audio o información del media
+ * Updated to work with our secure file storage system
+ * @param {Object} messageData - Complete message data with fileStorage information
  * @param {Object} agent - Agente para autenticación (opcional)
  * @param {Object} mediaData - Información adicional del media (opcional)
  * @param {string} messageId - ID del mensaje (opcional)
  * @returns {Promise<Object>} - Resultado de la transcripción
  */
-async function transcribeAudioWithTimeout(mediaInfo, agent = null, mediaData = null, messageId = null) {
+async function transcribeAudioWithTimeout(messageData, agent = null, mediaData = null, messageId = null) {
   try {
-    let audioUrl = mediaInfo;
+    let audioUrl = null;
     
-    // Si mediaInfo es un objeto (como en UltraMsg), extraer la URL
-    if (typeof mediaInfo === 'object' && mediaInfo.url) {
-      audioUrl = mediaInfo.url;
+    console.log('🎵 Starting audio transcription with file storage integration', {
+      messageId: messageId,
+      hasFileStorage: !!(messageData.fileStorage),
+      fileStorageStatus: messageData.fileStorage?.status
+    });
+
+    // PRIORITIZE OUR SECURE FILE STORAGE SYSTEM
+    if (messageData.fileStorage && messageData.fileStorage.status === 'success') {
+      // Use our secure file storage system
+      audioUrl = messageData.fileStorage.downloadUrl;
+      console.log('✅ Using secure file storage for audio transcription', {
+        fileId: messageData.fileStorage.fileId,
+        filename: messageData.fileStorage.filename,
+        fileSize: messageData.fileStorage.fileSizeHuman
+      });
+      
+    } else if (messageData.fileStorage && messageData.fileStorage.status === 'error') {
+      // File storage failed, return error immediately
+      console.error('❌ Cannot transcribe audio - file storage failed', {
+        errorCode: messageData.fileStorage.errorCode,
+        errorMessage: messageData.fileStorage.errorMessage
+      });
+      
+      return {
+        status: 'failed',
+        text: '',
+        error: `File storage failed: ${messageData.fileStorage.errorMessage}`
+      };
+      
+    } else {
+      // FALLBACK: Legacy behavior for backward compatibility (should be rare)
+      console.warn('⚠️ Using legacy audio processing - file storage not available');
+      
+      let mediaInfo = messageData.media || mediaData;
+      
+      // Si mediaInfo es un objeto (como en UltraMsg), extraer la URL
+      if (typeof mediaInfo === 'object' && mediaInfo.url) {
+        audioUrl = mediaInfo.url;
+      } else {
+        audioUrl = mediaInfo;
+      }
+      
+      // Si tenemos mediaData y agent, es un mensaje de WhatsApp Factory
+      if (mediaData && agent && messageId) {
+        console.log('Processing WhatsApp Factory audio with waId:', messageId);
+        audioUrl = await getAudioUrl(messageId, agent.instanceId, agent.id);
+        console.log('✅ WhatsApp Factory audio URL obtained:', audioUrl ? 'Success' : 'Failed');
+      }
     }
     
-    // Si tenemos mediaData y agent, es un mensaje de WhatsApp Factory
-    if (mediaData && agent && messageId) {
-      console.log('Processing WhatsApp Factory audio with waId:', messageId);
-      audioUrl = await getAudioUrl(messageId, agent.instanceId, agent.id);
-      console.log('✅ WhatsApp Factory audio URL obtained:', audioUrl ? 'Success' : 'Failed');
+    if (!audioUrl) {
+      throw new Error('No audio URL available for transcription');
     }
     
-    console.log('Transcribing audio with timeout:', audioUrl);
+    console.log('🎵 Transcribing audio from:', audioUrl.includes('files.api-ai-mvp.com') ? 'Secure Storage' : 'External Source');
     
     // Usar la función de transcripción principal
     const result = await transcribeAudio(audioUrl, agent, mediaData, messageId);
     
     // Convertir el resultado al formato esperado por messageQueue
     if (result.status === 'success') {
+      console.log('✅ Audio transcription completed successfully');
       return {
         status: 'completed',
         text: result.text
       };
     } else {
+      console.error('❌ Audio transcription failed:', result.status_reason || result.error);
       return {
         status: 'failed',
         text: '',
@@ -242,7 +287,7 @@ async function transcribeAudioWithTimeout(mediaInfo, agent = null, mediaData = n
     }
     
   } catch (error) {
-    console.error('Error in transcribeAudioWithTimeout:', error);
+    console.error('🚨 Error in transcribeAudioWithTimeout:', error);
     return {
       status: 'failed',
       text: '',

@@ -1,6 +1,6 @@
 const { OpenAI } = require("openai");
-// Healthcare-specific tools removed for generic chatbot engine
-// TODO: Add generic chatbot tools here if needed
+const requestManager = require('./requestManager');
+const Conversation = require('../models/Conversation');
 
 class OpenAIIntegration {
     constructor() {
@@ -27,10 +27,13 @@ class OpenAIIntegration {
                 `Adding ${messages.length} messages to thread ${threadId}`
             );
             for (const message of messages) {
-                console.log(
-                    "Message to add:",
-                    JSON.stringify(message, null, 2)
-                );
+                // 🧹 CLEAN LOG: Avoid logging full message with potential blob data
+                console.log("📤 Adding message to thread:", {
+                    role: message.role,
+                    contentLength: message.content[0]?.text?.length || 0,
+                    hasContent: !!message.content[0]?.text
+                });
+                
                 await this.openai.beta.threads.messages.create(
                     threadId,
                     message
@@ -208,7 +211,13 @@ class OpenAIIntegration {
                 ? JSON.stringify(msg.quoted_message)
                 : null;
 
-            console.log("msg", msg);
+            // 🔧 DIAGNOSTIC LOG: Verify fileStorage inclusion
+            console.log("🔍 DIAGNOSTIC - Message preparation for OpenAI:", {
+                messageId: msg.message_id,
+                hasFileStorage: !!msg.fileStorage,
+                fileStorageStatus: msg.fileStorage?.status || 'none',
+                fileStorageFileId: msg.fileStorage?.fileId || 'none'
+            });
 
             return {
                 role: "user",
@@ -227,6 +236,8 @@ class OpenAIIntegration {
                                     media_name: msg.media_name || null,
                                     sender: msg.sender,
                                     message_id: msg.message_id,
+                                    // 🔧 CRITICAL FIX: Include fileStorage for AI tools
+                                    fileStorage: msg.fileStorage || { status: 'not_applicable' }
                                 },
                             ],
                             system_message: parsedContent.system_message,
@@ -263,6 +274,12 @@ class OpenAIIntegration {
     async executeToolCalls(toolCalls, conversationId) {
         console.log("Executing tool calls for conversation:", conversationId);
         const toolOutputs = [];
+        
+        // Get conversation details for participant info
+        const conversation = await Conversation.findById(conversationId);
+        const participantId = conversation ? conversation.participantId : null;
+        const participantName = conversation ? conversation.participantName : 'Unknown';
+        
         for (const toolCall of toolCalls) {
             const {
                 id,
@@ -271,20 +288,101 @@ class OpenAIIntegration {
             let output;
 
             console.log(
-                `Executing function ${name} for conversation ${conversationId}`
+                `🔧 Executing function ${name} for conversation ${conversationId}`
             );
 
-            // Execute the appropriate function based on the name
-            switch (name) {
-                // TODO: Add generic chatbot functions here as needed
-                default:
-                    console.log(`Function call not implemented in generic mode: ${name}`);
-                    output = { 
-                        status: "not_implemented", 
-                        message: `Function ${name} is not available in this generic chatbot configuration`,
-                        function_name: name,
-                        args: JSON.parse(args)
-                    };
+            try {
+                const parsedArgs = JSON.parse(args);
+
+                // Execute the appropriate function based on the name
+                switch (name) {
+                    // ============================================================================
+                    // Request Management Tools - Parallel image processing with Google Gemini
+                    // ============================================================================
+
+                    case "newRequest":
+                        console.log(`📋 Creating new request with system prompt: "${parsedArgs.systemPrompt?.substring(0, 100)}..."`);
+                        
+                        output = await requestManager.createNewRequest(
+                            conversationId,
+                            participantId,
+                            participantName,
+                            parsedArgs.systemPrompt,
+                            parsedArgs.initialImages || [],
+                            parsedArgs.requestType || 'image_processing'
+                        );
+                        break;
+
+                    case "updateRequest":
+                        console.log(`🔄 Updating request ${parsedArgs.requestId} with ${parsedArgs.newImages?.length || 0} new images`);
+                        
+                        output = await requestManager.updateRequest(
+                            parsedArgs.requestId,
+                            parsedArgs.newImages || [],
+                            parsedArgs.instructions || ''
+                        );
+                        break;
+
+                    case "processRequest":
+                        console.log(`⚡ Processing request ${parsedArgs.requestId} with Google Gemini`);
+                        
+                        output = await requestManager.processRequest(
+                            parsedArgs.requestId,
+                            parsedArgs.finalPrompt || ''
+                        );
+                        break;
+
+                    // ============================================================================
+                    // Request Query Tools (Optional/Helper tools)
+                    // ============================================================================
+
+                    case "getRequestStatus":
+                        console.log(`📊 Getting status for request ${parsedArgs.requestId}`);
+                        
+                        output = await requestManager.getRequestStatus(parsedArgs.requestId);
+                        break;
+
+                    case "listActiveRequests":
+                        console.log(`📋 Listing active requests for conversation ${conversationId}`);
+                        
+                        output = await requestManager.listActiveRequests(conversationId);
+                        break;
+
+                    case "cancelRequest":
+                        console.log(`❌ Cancelling request ${parsedArgs.requestId}`);
+                        
+                        output = await requestManager.cancelRequest(parsedArgs.requestId);
+                        break;
+
+                    // ============================================================================
+                    // Default case for unimplemented functions
+                    // ============================================================================
+                    
+                    default:
+                        console.log(`❓ Function call not implemented: ${name}`);
+                        output = { 
+                            success: false,
+                            status: "not_implemented", 
+                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest`,
+                            function_name: name,
+                            args: parsedArgs
+                        };
+                        break;
+                }
+
+            } catch (error) {
+                console.error(`❌ Error executing function ${name}:`, error.message);
+                output = {
+                    success: false,
+                    status: "error",
+                    error: error.message,
+                    function_name: name
+                };
+            }
+
+            // Ensure output has required structure for OpenAI
+            if (!output.hasOwnProperty('success')) {
+                output.success = output.status === 'completed' || output.status === 'success';
             }
 
             toolOutputs.push({
@@ -292,6 +390,8 @@ class OpenAIIntegration {
                 output: JSON.stringify(output),
             });
         }
+        
+        console.log(`✅ Completed ${toolOutputs.length} tool calls for conversation ${conversationId}`);
         return toolOutputs;
     }
 }

@@ -1,0 +1,11 @@
+{
+  "name": "listActiveRequests",
+  "description": "List all active requests for the current conversation. Use this to show the user what image processing requests are currently available or in progress, helping manage multiple parallel workflows.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  }
+}

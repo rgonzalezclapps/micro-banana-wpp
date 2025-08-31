@@ -1,0 +1,134 @@
+{
+  "name": "enhanced_fotoproducto_response_schema",
+  "description": "Enhanced response schema for Foto Producto assistant that combines lead capture with AI image processing capabilities",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "timestamp": {
+        "type": "string",
+        "description": "Timestamp of the user's last message plus 5 seconds to emulate thinking time"
+      },
+      "thinking": {
+        "type": "string", 
+        "description": "Assistant's internal reasoning using chain of thought approach, including analysis of both commercial needs and technical requirements"
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "recipient": {
+            "type": "string",
+            "description": "The recipient of the message, typically 'user'"
+          },
+          "message": {
+            "type": "string",
+            "description": "Warm, professional reply to the user combining commercial communication with technical capabilities as needed"
+          }
+        },
+        "required": [
+          "recipient",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "ai_system_message": {
+        "type": "object",
+        "properties": {
+          "lead_info": {
+            "type": "object",
+            "properties": {
+              "full_name": {
+                "type": "string",
+                "description": "Full name if provided by user, empty string if not provided"
+              },
+              "phone": {
+                "type": "string", 
+                "description": "Phone number from webhook if available, empty string otherwise"
+              },
+              "email": {
+                "type": "string",
+                "description": "Empty string by default unless specifically provided"
+              },
+              "company": {
+                "type": "string",
+                "description": "Empty string by default unless specifically mentioned"
+              },
+              "interest": {
+                "type": "string",
+                "description": "Description of image processing type requested or service needed"
+              },
+              "notes": {
+                "type": "string",
+                "description": "Details about processed requests and delivered results"
+              }
+            },
+            "required": [
+              "full_name",
+              "phone", 
+              "email",
+              "company",
+              "interest",
+              "notes"
+            ],
+            "additionalProperties": false
+          },
+          "current_flow": {
+            "type": "object", 
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "awaiting_name",
+                  "ready_to_process",
+                  "processing_images", 
+                  "delivering_results"
+                ],
+                "description": "Current stage in the lead capture and service flow"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "image_processing": {
+            "type": "object",
+            "properties": {
+              "active_requests": {
+                "type": "string",
+                "description": "Number of active image processing requests as string, '0' if none"
+              },
+              "last_request_id": {
+                "type": "string", 
+                "description": "ID of the most recent request if any were processed, empty string if none"
+              },
+              "processing_type": {
+                "type": "string",
+                "description": "Description of the type of image processing performed, empty string if none"
+              }
+            },
+            "required": [
+              "active_requests",
+              "last_request_id", 
+              "processing_type"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "lead_info",
+          "current_flow",
+          "image_processing"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "timestamp",
+      "thinking",
+      "response", 
+      "ai_system_message"
+    ],
+    "additionalProperties": false
+  }
+}

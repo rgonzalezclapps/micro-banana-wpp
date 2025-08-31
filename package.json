@@ -18,6 +18,7 @@
   "description": "",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@google/genai": "^1.16.0",
     "@mui/material": "^6.0.2",
     "axios": "^1.7.7",
     "bcrypt": "^5.1.1",
@@ -46,7 +47,9 @@
     "nodemon": "^3.1.4"
   },
   "nodemonConfig": {
-    "ignore": ["temp/*"]
+    "ignore": [
+      "temp/*"
+    ]
   },
   "browser": {
     "crypto": false

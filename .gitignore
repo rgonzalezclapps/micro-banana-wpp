@@ -3,3 +3,10 @@ node_modules
 docs
 workbench
 .env
+assistant_tools/enhanced_assistant_prompt_v2.md
+.gitignore
+assistant_tools/simplified_assistant_prompt_v2.md
+assistant_tools/simplified_assistant_prompt.md
+assistant_tools/enhanced_assistant_prompt_v3_secure.md
+assistant_tools/enhanced_assistant_prompt.md
+assistant_tools/FINAL_CONFIGURATION.md
