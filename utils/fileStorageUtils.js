@@ -23,6 +23,7 @@ const crypto = require('crypto');
 
 // File storage server configuration from server.md
 const FILE_STORAGE_BASE_URL = process.env.FILE_STORAGE_BASE_URL || 'https://files.api-ai-mvp.com';
+const FILE_STORAGE_EXTERNAL_URL = process.env.FILE_STORAGE_EXTERNAL_URL || 'https://files.api-ai-mvp.com';
 const FILE_STORAGE_API_KEY = process.env.API_KEY_WEBHOOK; // Using same API key as documented
 const FILE_SIZE_LIMIT = parseInt(process.env.FILE_SIZE_LIMIT || '25') * 1024 * 1024; // Convert MB to bytes
 
@@ -410,7 +411,7 @@ function createDownloadUrl(fileId) {
  * Creates external download URL for third-party services like UltraMsg
  */
 function createExternalDownloadUrl(fileId) {
-  return `https://files.api-ai-mvp.com/file/${fileId}?key=${FILE_STORAGE_API_KEY}`;
+  return `${FILE_STORAGE_EXTERNAL_URL}/file/${fileId}?key=${FILE_STORAGE_API_KEY}`;
 }
 
 /**

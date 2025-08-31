@@ -23,7 +23,7 @@ const fs = require('fs').promises;
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-const { createDownloadUrl } = require('../utils/fileStorageUtils');
+const { createDownloadUrl, createExternalDownloadUrl } = require('../utils/fileStorageUtils');
 
 class GoogleGeminiService {
   constructor() {
@@ -363,6 +363,7 @@ class GoogleGeminiService {
           fileId: storageResult.fileId,
           filename: storageResult.filename,
           downloadUrl: storageResult.downloadUrl,
+          externalUrl: createExternalDownloadUrl(storageResult.fileId),
           fileSize: storageResult.fileSize,
           mimeType: mimeType
         };
