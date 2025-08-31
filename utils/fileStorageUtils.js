@@ -108,6 +108,7 @@ async function downloadAndStoreMedia(mediaData, messageType, originalFilename = 
       fileSizeHuman: `${(downloadResult.buffer.length / 1024 / 1024).toFixed(2)}MB`,
       contentType: downloadResult.contentType,
       downloadUrl: uploadResult.downloadUrl,
+      externalUrl: uploadResult.externalUrl,
       uploadDate: new Date().toISOString(),
       requestId: requestId
     };
@@ -298,10 +299,15 @@ async function uploadToFileStorage(buffer, filename, contentType, requestId) {
       downloadUrl: response.data.download_url
     });
 
+    // Use our URL generation instead of server-returned path
+    const internalDownloadUrl = createDownloadUrl(response.data.file_id);
+    const externalDownloadUrl = createExternalDownloadUrl(response.data.file_id);
+    
     return {
       success: true,
       fileId: response.data.file_id,
-      downloadUrl: response.data.download_url
+      downloadUrl: internalDownloadUrl,
+      externalUrl: externalDownloadUrl
     };
 
   } catch (error) {
@@ -394,10 +400,17 @@ function createErrorResult(errorCode, errorMessage, requestId) {
 }
 
 /**
- * Creates download URL for accessing stored file
+ * Creates download URL for accessing stored file (internal Docker network)
  */
 function createDownloadUrl(fileId) {
   return `${FILE_STORAGE_BASE_URL}/file/${fileId}?key=${FILE_STORAGE_API_KEY}`;
+}
+
+/**
+ * Creates external download URL for third-party services like UltraMsg
+ */
+function createExternalDownloadUrl(fileId) {
+  return `https://files.api-ai-mvp.com/file/${fileId}?key=${FILE_STORAGE_API_KEY}`;
 }
 
 /**
@@ -430,6 +443,7 @@ module.exports = {
   downloadAndStoreMedia,
   hasMediaContent,
   createDownloadUrl,
+  createExternalDownloadUrl,
   ALLOWED_EXTENSIONS,
   MEDIA_TYPE_MAPPING
 };

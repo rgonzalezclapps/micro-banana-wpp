@@ -147,6 +147,10 @@ async function transcribeAudio(url, agent = null, mediaInfo = null, messageId = 
     });
     
     console.log('Transcription completed successfully');
+    console.log('🔍 OpenAI Whisper response:', JSON.stringify(transcription));
+    console.log('🔍 Text content:', transcription || '[EMPTY/NULL]');
+    console.log('🔍 Text length:', transcription ? transcription.length : 0);
+    console.log('🔍 Text type:', typeof transcription);
         return {
       status: 'success',
       text: transcription,

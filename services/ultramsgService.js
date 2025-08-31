@@ -190,7 +190,7 @@ async function sendUltraMsgSmart(agent, to, content, messageToQuote = '') {
       
       // Send the first generated image (most common case)
       const primaryImage = generatedImages[0];
-      const imageUrl = primaryImage.downloadUrl;
+      const imageUrl = primaryImage.externalUrl || primaryImage.downloadUrl;
       const caption = textResponse || '';
       
       return await sendUltraMsgImage(agent, to, imageUrl, caption, messageToQuote);
