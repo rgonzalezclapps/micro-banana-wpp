@@ -48,9 +48,11 @@ router.post('/', async (req, res) => {
       const xRequestId = req.headers['x-request-id'];
       
       // Extract data.id from multiple possible locations (per MP documentation)
-      const dataId = req.query['data.id'] || // Query param: ?data.id=123456
-                     req.body?.data?.id ||    // Body: {"data": {"id": "123456"}}
-                     req.params?.id;          // URL param fallback
+      const dataId = req.query['data.id'] ||  // Query param: ?data.id=123456 (payment webhooks)
+                     req.body?.data?.id ||     // Body: {"data": {"id": "123456"}} (payment webhooks)
+                     req.query.id ||           // Query param: ?id=33652629180 (merchant_order webhooks)
+                     req.body?.id ||           // Body: {"id": "123456"} (alternative format)
+                     req.params?.id;           // URL param fallback
       
       console.log(`🔍 [${requestId}] MercadoPago auth - Headers: {
         hasSignature: ${!!signature},
@@ -58,7 +60,9 @@ router.post('/', async (req, res) => {
         dataId: ${dataId || 'NOT_FOUND'},
         queryDataId: ${req.query['data.id'] || 'NOT_FOUND'},
         bodyDataId: ${req.body?.data?.id || 'NOT_FOUND'},
-        webhookType: ${req.body?.type || 'NOT_FOUND'},
+        queryId: ${req.query.id || 'NOT_FOUND'},
+        bodyId: ${req.body?.id || 'NOT_FOUND'},
+        webhookType: ${req.body?.type || req.body?.topic || req.query?.topic || 'NOT_FOUND'},
         hasSecretKey: ${!!process.env.MP_SECRET_KEY}
       }`);
       
@@ -88,30 +92,27 @@ router.post('/', async (req, res) => {
         });
       }
       
-      // 🔧 ARCHITECTURAL FIX: Handle different webhook types
-      const webhookType = req.body?.type;
+      // 🔧 ARCHITECTURAL FIX: Handle different webhook types  
+      const webhookType = req.body?.type || req.body?.topic || req.query?.topic;
       
-      if (!dataId && webhookType === 'merchant_order') {
-        // Merchant order webhooks might not have data.id in the same format
-        console.log(`⚠️ [${requestId}] merchant_order webhook without data.id - checking alternative sources`);
-        
-        // For merchant_order, try alternative ID sources
-        const merchantOrderId = req.body?.id || 
-                               req.body?.merchant_order?.id ||
-                               req.query?.id;
-                               
-        if (merchantOrderId) {
-          console.log(`✅ [${requestId}] Found merchant_order ID: ${merchantOrderId}`);
-          // We'll handle this as a special case
+      if (!dataId) {
+        if (webhookType === 'merchant_order') {
+          console.log(`ℹ️ [${requestId}] merchant_order webhook - these are informational and can be safely ignored for credit processing`);
+          console.log(`📄 [${requestId}] merchant_order details: id=${req.query.id}, resource=${req.body?.resource}`);
+          
+          // Respond OK but don't process (merchant_order is informational)
+          return res.status(200).json({ 
+            message: 'merchant_order webhook received and acknowledged',
+            type: 'merchant_order',
+            id: req.query.id 
+          });
         } else {
-          console.warn(`🔍 [${requestId}] merchant_order webhook with no identifiable ID - proceeding with validation`);
+          console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
+          return res.status(401).json({ 
+            error: 'MERCADOPAGO_AUTH_FAILED',
+            message: `Missing data.id for ${webhookType || 'unknown'} webhook` 
+          });
         }
-      } else if (!dataId) {
-        console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
-        return res.status(401).json({ 
-          error: 'MERCADOPAGO_AUTH_FAILED',
-          message: `Missing data.id for ${webhookType || 'unknown'} webhook` 
-        });
       }
 
       // MercadoPago signature validation will be done in the MP handler
@@ -121,28 +122,28 @@ router.post('/', async (req, res) => {
       console.log(`🔐 [${requestId}] Applying standard API Key authentication for provider: ${provider}`);
       
       // Standard providers use API Key authentication  
-      const providedApiKey = req.headers['x-api-key'] || 
-                            req.headers['authorization']?.replace('Bearer ', '') ||
-                            req.query.api_key ||
-                            req.query.key;
-      const expectedApiKey = process.env.API_KEY_WEBHOOK;
-      
-      if (!expectedApiKey) {
-        console.error(`❌ [${requestId}] API_KEY_WEBHOOK not configured in environment`);
-        return res.status(500).json({ 
-          error: 'WEBHOOK_MISCONFIGURED',
-          message: 'Webhook authentication not configured' 
-        });
-      }
-      
-      if (!providedApiKey || providedApiKey !== expectedApiKey) {
-        console.warn(`🚫 [${requestId}] Unauthorized webhook attempt from ${req.ip} - Invalid API key`);
-        return res.status(401).json({ 
-          error: 'UNAUTHORIZED',
-          message: 'Valid API key required. Provide via X-API-Key header, Authorization Bearer token, or ?api_key= query parameter.' 
-        });
-      }
-      
+  const providedApiKey = req.headers['x-api-key'] || 
+                        req.headers['authorization']?.replace('Bearer ', '') ||
+                        req.query.api_key ||
+                        req.query.key;
+  const expectedApiKey = process.env.API_KEY_WEBHOOK;
+  
+  if (!expectedApiKey) {
+    console.error(`❌ [${requestId}] API_KEY_WEBHOOK not configured in environment`);
+    return res.status(500).json({ 
+      error: 'WEBHOOK_MISCONFIGURED',
+      message: 'Webhook authentication not configured' 
+    });
+  }
+  
+  if (!providedApiKey || providedApiKey !== expectedApiKey) {
+    console.warn(`🚫 [${requestId}] Unauthorized webhook attempt from ${req.ip} - Invalid API key`);
+    return res.status(401).json({ 
+      error: 'UNAUTHORIZED',
+      message: 'Valid API key required. Provide via X-API-Key header, Authorization Bearer token, or ?api_key= query parameter.' 
+    });
+  }
+  
       console.log(`✅ [${requestId}] API key authenticated successfully for ${provider}`);
     }
     
