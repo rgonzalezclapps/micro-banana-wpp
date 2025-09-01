@@ -197,7 +197,7 @@ router.post('/', async (req, res) => {
             include: [{
               model: Agent,
               as: 'agent',
-              where: { status: 'Ready' }
+              where: { status: 'Active' }
             }]
           });
           
