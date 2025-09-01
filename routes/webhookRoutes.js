@@ -196,15 +196,16 @@ router.post('/', async (req, res) => {
             where: { participantId: result.participantId },
             include: [{
               model: Agent,
+              as: 'agent',
               where: { status: 'Ready' }
             }]
           });
           
-          if (association && association.Agent) {
+          if (association && association.agent) {
             const confirmationMessage = `✅ ¡Pago confirmado!\n\nHemos registrado tu pago por $${result.amount} ARS y acreditado ${result.creditsAdded} créditos a tu cuenta.\n\n💰 Saldo actual: ${result.newBalance} créditos`;
             
             await ultramsgService.sendUltraMsg(
-              association.Agent,
+              association.agent,
               result.phoneNumber,
               confirmationMessage
             );
