@@ -95,24 +95,26 @@ router.post('/', async (req, res) => {
       // 🔧 ARCHITECTURAL FIX: Handle different webhook types  
       const webhookType = req.body?.type || req.body?.topic || req.query?.topic;
       
+      // 🔧 STRATEGIC FIX: Handle merchant_order webhooks separately  
+      if (webhookType === 'merchant_order') {
+        console.log(`ℹ️ [${requestId}] merchant_order webhook - acknowledged without strict processing`);
+        console.log(`📄 [${requestId}] merchant_order details: id=${req.query.id || dataId}, resource=${req.body?.resource}`);
+        
+        // merchant_order webhooks are informational - acknowledge but don't process credits
+        return res.status(200).json({ 
+          message: 'merchant_order webhook acknowledged',
+          type: 'merchant_order',
+          id: req.query.id || dataId,
+          note: 'merchant_order notifications are informational and do not trigger credit processing'
+        });
+      }
+      
       if (!dataId) {
-        if (webhookType === 'merchant_order') {
-          console.log(`ℹ️ [${requestId}] merchant_order webhook - these are informational and can be safely ignored for credit processing`);
-          console.log(`📄 [${requestId}] merchant_order details: id=${req.query.id}, resource=${req.body?.resource}`);
-          
-          // Respond OK but don't process (merchant_order is informational)
-          return res.status(200).json({ 
-            message: 'merchant_order webhook received and acknowledged',
-            type: 'merchant_order',
-            id: req.query.id 
-          });
-        } else {
-          console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
-          return res.status(401).json({ 
-            error: 'MERCADOPAGO_AUTH_FAILED',
-            message: `Missing data.id for ${webhookType || 'unknown'} webhook` 
-          });
-        }
+        console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
+        return res.status(401).json({ 
+          error: 'MERCADOPAGO_AUTH_FAILED',
+          message: `Missing data.id for ${webhookType || 'unknown'} webhook` 
+        });
       }
 
       // MercadoPago signature validation will be done in the MP handler
@@ -176,7 +178,8 @@ router.post('/', async (req, res) => {
       const result = await mercadopagoService.processWebhookNotification(
         req.body,
         signature,
-        xRequestId
+        xRequestId,
+        dataId  // Pass the correctly extracted dataId
       );
       
       console.log(`📊 [${requestId}] MercadoPago processing result:`, result);

@@ -276,29 +276,34 @@ class MercadoPagoService {
    * @param {Object} webhookData Webhook notification data
    * @param {string} signature X-Signature header
    * @param {string} requestId X-Request-Id header
+   * @param {string} dataId Extracted data ID from webhook (from multiple sources)
    * @returns {Promise<Object>} Processing result
    */
-  async processWebhookNotification(webhookData, signature, requestId) {
+  async processWebhookNotification(webhookData, signature, requestId, dataId = null) {
     console.log('🔔 Processing MercadoPago webhook notification:', {
-      type: webhookData.type,
+      type: webhookData.type || webhookData.topic,
       action: webhookData.action,
-      dataId: webhookData.data?.id
+      dataId: dataId || webhookData.data?.id,
+      extractedDataId: dataId,
+      bodyDataId: webhookData.data?.id
     });
 
     try {
-      // Validate webhook signature
-      if (!this.validateWebhookSignature(signature, requestId, webhookData.data?.id)) {
+      // Validate webhook signature using the correctly extracted dataId
+      const finalDataId = dataId || webhookData.data?.id;
+      if (!this.validateWebhookSignature(signature, requestId, finalDataId)) {
         console.warn('⚠️ Invalid webhook signature, ignoring notification');
         return { success: false, reason: 'invalid_signature' };
       }
 
-      // Only process payment notifications
-      if (webhookData.type !== 'payment') {
-        console.log('ℹ️ Non-payment notification, skipping processing');
-        return { success: true, reason: 'non_payment_notification' };
+      // Only process payment notifications (check both 'type' and 'topic' fields)
+      const notificationType = webhookData.type || webhookData.topic;
+      if (notificationType !== 'payment') {
+        console.log(`ℹ️ Non-payment notification (${notificationType}), skipping processing`);
+        return { success: true, reason: 'non_payment_notification', type: notificationType };
       }
 
-      const paymentId = webhookData.data?.id;
+      const paymentId = dataId || webhookData.data?.id;
       if (!paymentId) {
         console.warn('⚠️ No payment ID in webhook data');
         return { success: false, reason: 'missing_payment_id' };
