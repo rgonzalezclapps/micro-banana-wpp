@@ -23,6 +23,7 @@ const fs = require('fs').promises;
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
+const Request = require('../models/Request');
 const { createDownloadUrl, createExternalDownloadUrl } = require('../utils/fileStorageUtils');
 
 class GoogleGeminiService {
@@ -35,63 +36,239 @@ class GoogleGeminiService {
     // Model configuration for image processing
     this.MODEL_NAME = 'gemini-2.5-flash-image-preview';
     this.DEFAULT_CONFIG = {
-      responseModalities: ['IMAGE', 'TEXT'],
+      responseModalities: ['IMAGE'],
       systemInstruction: []
     };
     
     // Request timeout and limits
     this.REQUEST_TIMEOUT = 60000; // 60 seconds
-    this.MAX_INPUT_IMAGES = 3;    // Gemini works best with up to 3 images
+    this.MAX_INPUT_IMAGES = 15;    // Gemini works best with up to 3 images
     this.MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit for inline data
   }
 
   /**
-   * Process images with text prompt using Gemini
-   * @param {Array} imageFileIds - Array of file IDs from our storage system
-   * @param {string} textPrompt - User's text prompt for processing
-   * @param {string} systemPrompt - System instruction for processing style
+   * Build Gemini conversation context from request history
+   * @param {Object} request - MongoDB Request document
+   * @param {string} currentPrompt - Current user prompt to add
+   * @param {Array} currentTurnImages - Images for CURRENT turn only (not all inputImages)
+   * @param {string} requestId - Request ID for logging
+   * @returns {Array} Gemini conversation contents array
+   */
+  async buildGeminiConversation(request, currentPrompt, currentTurnImages = [], requestId) {
+    console.log(`🔄 [${requestId}] Building Gemini conversation context`, {
+      historyEntries: request.conversationHistory?.length || 0,
+      currentPromptLength: currentPrompt.length,
+      currentTurnImages: currentTurnImages.length
+    });
+
+    const contents = [];
+
+    try {
+      // Add conversation history with proper role/parts structure
+      if (request.conversationHistory && request.conversationHistory.length > 0) {
+        console.log(`📚 [${requestId}] Adding ${request.conversationHistory.length} history entries to context`);
+        
+        for (const historyEntry of request.conversationHistory) {
+          const parts = [];
+          
+          for (const part of historyEntry.parts) {
+            if (part.type === 'text') {
+              parts.push({ text: part.content });
+            } else if (part.type === 'image') {
+              try {
+                const imageData = await this.loadImageForConversation(part.content, requestId);
+                if (imageData) {
+                  parts.push({ inlineData: imageData });
+                }
+              } catch (imageError) {
+                console.warn(`⚠️ [${requestId}] Failed to load conversation image ${part.content}:`, imageError.message);
+                // Continue without this image rather than failing entire conversation
+              }
+            }
+          }
+          
+          if (parts.length > 0) {
+            contents.push({
+              role: historyEntry.role,
+              parts: parts
+            });
+          }
+        }
+      }
+
+      // Add current user turn
+      const currentParts = [{ text: currentPrompt }];
+      
+      // Add ONLY current turn images (not all inputImages from history)
+      console.log(`🖼️ [${requestId}] Adding ${currentTurnImages.length} images to current turn (NOT ${request.inputImages.length} total images)`);
+      for (const imageFileId of currentTurnImages) {
+        try {
+          const imageData = await this.loadImageForConversation(imageFileId, requestId);
+          if (imageData) {
+            currentParts.push({ inlineData: imageData });
+          }
+        } catch (imageError) {
+          console.warn(`⚠️ [${requestId}] Failed to load current turn image ${imageFileId}:`, imageError.message);
+          // Continue without this image
+        }
+      }
+      
+      contents.push({
+        role: 'user',
+        parts: currentParts
+      });
+
+      console.log(`✅ [${requestId}] Built conversation with ${contents.length} turns`, {
+        totalParts: contents.reduce((sum, turn) => sum + turn.parts.length, 0),
+        userTurns: contents.filter(c => c.role === 'user').length,
+        modelTurns: contents.filter(c => c.role === 'model').length
+      });
+
+      return contents;
+
+    } catch (error) {
+      console.error(`❌ [${requestId}] Failed to build conversation context:`, error.message);
+      // Fallback to simple prompt + current turn images (old behavior)
+      console.log(`🔄 [${requestId}] Falling back to simple conversation structure`);
+      
+      const imageContents = await this.prepareImagesForGemini(
+        currentTurnImages, 
+        requestId
+      );
+      
+      return [
+        { text: currentPrompt },
+        ...imageContents
+      ];
+    }
+  }
+
+  /**
+   * Load image from storage for conversation context
+   * @param {string} fileId - File ID from our storage system
+   * @param {string} requestId - Request ID for logging
+   * @returns {Object|null} Image data for Gemini or null if failed
+   */
+  async loadImageForConversation(fileId, requestId) {
+    try {
+      // Create download URL for the image
+      const downloadUrl = createDownloadUrl(fileId);
+      
+      console.log(`📥 [${requestId}] Loading conversation image: ${fileId}`);
+      
+      // Download image data
+      const response = await axios.get(downloadUrl, {
+        responseType: 'arraybuffer',
+        timeout: this.REQUEST_TIMEOUT,
+        headers: {
+          'Accept': 'image/*'
+        }
+      });
+
+      // Convert to base64
+      const base64Image = Buffer.from(response.data).toString('base64');
+      
+      // Get MIME type from response headers or guess from file
+      const mimeType = response.headers['content-type'] || 'image/jpeg';
+      
+      return {
+        mimeType,
+        data: base64Image
+      };
+      
+    } catch (error) {
+      console.error(`❌ [${requestId}] Failed to load conversation image ${fileId}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Process images with conversation context using Gemini - ENHANCED
+   * @param {Object} request - MongoDB Request document with full context
+   * @param {string} textPrompt - Current user's text prompt for processing
+   * @param {Array} currentTurnImageIds - File IDs for CURRENT turn only (not all request images)
    * @param {string} requestId - Request ID for tracking
    * @returns {Object} Processing result with generated images and text
    */
-  async processImages(imageFileIds, textPrompt, systemPrompt, requestId) {
+  async processImages(request, textPrompt, currentTurnImageIds = [], requestId) {
     const processingStart = Date.now();
-    console.log(`🎨 [${requestId}] Starting Gemini image processing`, {
-      imageCount: imageFileIds.length,
+    console.log(`🎨 [${requestId}] Starting Gemini image processing with conversation context`, {
+      totalImages: request.inputImages.length,
+      currentTurnImages: currentTurnImageIds.length,
       textPromptLength: textPrompt.length,
-      systemPromptLength: systemPrompt.length
+      systemPromptLength: request.systemPrompt.length,
+      conversationTurns: request.conversationHistory?.length || 0
     });
 
     try {
-      // Validate inputs
-      if (!imageFileIds || imageFileIds.length === 0) {
-        throw new Error('At least one image is required for processing');
+      // Validate inputs - check current turn images
+      if (!currentTurnImageIds || currentTurnImageIds.length === 0) {
+        // Allow processing without images for text-only iterations
+        console.log(`📝 [${requestId}] Processing text-only turn (no current images)`);
       }
       
-      if (imageFileIds.length > this.MAX_INPUT_IMAGES) {
-        console.warn(`⚠️ [${requestId}] Too many images provided (${imageFileIds.length}), using first ${this.MAX_INPUT_IMAGES}`);
-        imageFileIds = imageFileIds.slice(0, this.MAX_INPUT_IMAGES);
+      if (currentTurnImageIds.length > this.MAX_INPUT_IMAGES) {
+        console.warn(`⚠️ [${requestId}] Too many images in current turn (${currentTurnImageIds.length}), using first ${this.MAX_INPUT_IMAGES}`);
+        currentTurnImageIds = currentTurnImageIds.slice(0, this.MAX_INPUT_IMAGES);
       }
 
-      // Prepare images for Gemini
-      const imageContents = await this.prepareImagesForGemini(imageFileIds, requestId);
+      // Build conversation context with history - FIXED: pass current turn images only
+      const contents = await this.buildGeminiConversation(request, textPrompt, currentTurnImageIds, requestId);
       
-      // Configure request - FORCE image generation
+      // Configure request - FORCE image generation with conversation support
       const config = {
         ...this.DEFAULT_CONFIG,
+        responseModalities: ['IMAGE', 'TEXT'], // Allow both for conversation
         systemInstruction: [{
-          text: (systemPrompt || this.getDefaultSystemPrompt()) + "\n\nCRITICAL: You MUST generate and return an IMAGE. Do not return text-only responses."
+          text: (request.systemPrompt || this.getDefaultSystemPrompt()) + "\n\nCRITICAL: You MUST generate and return an IMAGE. Do not return text-only responses."
         }]
       };
 
-      // Prepare content array
-      const contents = [
-        { text: textPrompt },
-        ...imageContents
-      ];
-
-      console.log(`🚀 [${requestId}] Sending request to Gemini`, {
+      // Log the request object without blobs for readability
+      const requestForLogging = {
         model: this.MODEL_NAME,
-        contentCount: contents.length,
+        config,
+        contents: contents.map(turn => {
+          if (turn.role) {
+            // New conversation format
+            return {
+              role: turn.role,
+              parts: turn.parts.map(part => {
+                if (part.inlineData) {
+                  return {
+              inlineData: {
+                      mimeType: part.inlineData.mimeType,
+                      data: `[BLOB_DATA_${part.inlineData.data?.length || 'unknown'}_BYTES]`
+                    }
+                  };
+                } else if (part.text) {
+                  return { text: part.text };
+                }
+                return part;
+              })
+            };
+          } else {
+            // Fallback format
+            if (turn.inlineData) {
+              return {
+                ...turn,
+                inlineData: {
+                  mimeType: turn.inlineData.mimeType,
+                  data: `[BLOB_DATA_${turn.inlineData.data?.length || 'unknown'}_BYTES]`
+                }
+              };
+            }
+            return turn;
+          }
+        })
+      };
+      
+      console.log(`📤 [${requestId}] Full conversation request:`, JSON.stringify(requestForLogging, null, 2));
+
+      console.log(`🚀 [${requestId}] Sending conversational request to Gemini`, {
+        model: this.MODEL_NAME,
+        conversationTurns: contents.length,
+        totalParts: contents.reduce((sum, turn) => sum + (turn.parts?.length || 1), 0),
         hasSystemInstruction: !!config.systemInstruction[0].text
       });
 
@@ -102,21 +279,52 @@ class GoogleGeminiService {
         contents
       });
 
-      // Process response
+      // Process response (enhanced for multiple outputs)
       const result = await this.processGeminiResponse(response, requestId);
       
+      // UPDATE CONVERSATION HISTORY: Add current user turn and model response
+      try {
+        console.log(`📝 [${requestId}] Updating conversation history with current exchange`);
+        
+        // Add user turn (current prompt + CURRENT TURN images only)
+        await request.addUserTurnToHistory(
+          textPrompt,
+          currentTurnImageIds // Use current turn images, not all inputImages
+        );
+        
+        // Add model turn (text response + generated images)
+        const generatedImageFileIds = result.generatedImages.map(img => img.fileId);
+        await request.addModelTurnToHistory(
+          result.textResponse || '',
+          generatedImageFileIds
+        );
+        
+        console.log(`✅ [${requestId}] Conversation history updated`, {
+          totalHistoryEntries: request.conversationHistory.length + 2 // +2 for the turns we just added
+        });
+        
+      } catch (historyError) {
+        console.warn(`⚠️ [${requestId}] Failed to update conversation history (non-blocking):`, historyError.message);
+        // Don't fail the entire processing for history update errors
+      }
+      
       const processingTime = Date.now() - processingStart;
-      console.log(`✅ [${requestId}] Gemini processing completed`, {
+      console.log(`✅ [${requestId}] Gemini processing completed with conversation context`, {
         processingTime: `${processingTime}ms`,
         resultType: result.type,
         hasGeneratedImages: result.generatedImages.length > 0,
-        textResponse: !!result.textResponse
+        textResponseLength: result.textResponse?.length || 0,
+        conversationTurns: request.conversationHistory?.length || 0
       });
 
       return {
         success: true,
         ...result,
-        processingTime
+        processingTime,
+        conversationContext: {
+          totalTurns: request.conversationHistory?.length || 0,
+          currentIteration: request.currentIteration
+        }
       };
 
     } catch (error) {
@@ -266,13 +474,14 @@ class GoogleGeminiService {
   }
 
   /**
-   * Process Gemini API response and extract images/text
+   * Process Gemini API response and extract images/text - ENHANCED for multiple outputs
    */
   async processGeminiResponse(response, requestId) {
     const result = {
       type: 'unknown',
       textResponse: '',
-      generatedImages: []
+      generatedImages: [],
+      conversationParts: [] // NEW: Track order and type of each part
       // 🧹 REMOVED: rawResponse to prevent blob logging
     };
 
@@ -285,44 +494,139 @@ class GoogleGeminiService {
       throw new Error('Invalid response structure from Gemini');
     }
 
-    console.log(`📊 [${requestId}] Processing Gemini response`, {
+    console.log(`📊 [${requestId}] Processing Gemini response with multiple outputs support`, {
       candidateCount: response.candidates.length,
       partCount: candidate.content.parts.length
     });
 
-    // Process each part of the response
+    let accumulatedText = ''; // Track text for associating with images
+    let responseOrder = 0; // Track order of responses for proper sequencing
+
+    // Process each part of the response in order
     for (let i = 0; i < candidate.content.parts.length; i++) {
       const part = candidate.content.parts[i];
 
       if (part.text) {
+        accumulatedText += part.text;
         result.textResponse += part.text;
         result.type = result.type === 'unknown' ? 'text' : 'mixed';
-        console.log(`📝 [${requestId}] Text response received (${part.text.length} chars)`);
+        
+        // Track this text part for conversation context
+        result.conversationParts.push({
+          type: 'text',
+          content: part.text,
+          order: responseOrder++
+        });
+        
+        console.log(`📝 [${requestId}] Text response received (${part.text.length} chars, order: ${responseOrder - 1})`);
       }
 
       if (part.inlineData) {
         try {
-          const generatedImage = await this.saveGeneratedImage(part.inlineData, requestId, i);
+          const generatedImage = await this.saveGeneratedImageWithMetadata(
+            part.inlineData, 
+            requestId, 
+            i, 
+            responseOrder, 
+            accumulatedText,
+            candidate.content.parts.length > 1
+          );
+          
           result.generatedImages.push(generatedImage);
           result.type = result.type === 'unknown' ? 'image' : 'mixed';
-          console.log(`🖼️ [${requestId}] Generated image saved: ${generatedImage.fileId}`);
+          
+          // Track this image part for conversation context
+          result.conversationParts.push({
+            type: 'image',
+            content: generatedImage.fileId,
+            order: responseOrder++
+          });
+          
+          console.log(`🖼️ [${requestId}] Generated image saved with metadata:`, {
+            fileId: generatedImage.fileId,
+            order: generatedImage.responseOrder,
+            hasAssociatedText: !!generatedImage.associatedText
+          });
+          
+          // Clear accumulated text after associating with image
+          accumulatedText = '';
+          
         } catch (error) {
           console.error(`❌ [${requestId}] Failed to save generated image ${i}:`, error.message);
         }
       }
     }
 
-    console.log(`✅ [${requestId}] Response processing completed`, {
+    console.log(`✅ [${requestId}] Enhanced response processing completed`, {
       type: result.type,
       textLength: result.textResponse.length,
-      imageCount: result.generatedImages.length
+      imageCount: result.generatedImages.length,
+      partsCount: result.conversationParts.length,
+      isMultipleResponse: result.generatedImages.length > 1 || (result.generatedImages.length > 0 && result.textResponse.length > 0)
     });
 
     return result;
   }
 
   /**
-   * Save generated image to our file storage system
+   * Save generated image with enhanced metadata for multiple response support
+   */
+  async saveGeneratedImageWithMetadata(inlineData, requestId, imageIndex, responseOrder, associatedText = '', isMultipleResponse = false) {
+    try {
+      // Import here to avoid circular dependency
+      const { downloadAndStoreMedia } = require('../utils/fileStorageUtils');
+      
+      // Convert base64 to buffer
+      const imageBuffer = Buffer.from(inlineData.data, 'base64');
+      const mimeType = inlineData.mimeType || 'image/png';
+      
+      // Create a filename with order information
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const randomId = crypto.randomBytes(4).toString('hex');
+      const extension = this.getExtensionFromMimeType(mimeType);
+      const filename = `${timestamp}_${randomId}_gemini-generated_${timestamp}_${randomId}.${extension}`;
+
+      console.log(`💾 [${requestId}] Saving generated image with metadata`, {
+        filename,
+        mimeType,
+        sizeKB: Math.round(imageBuffer.length / 1024),
+        responseOrder,
+        hasAssociatedText: !!associatedText,
+        isMultipleResponse
+      });
+
+      // Create a temporary data URL to use our existing storage system
+      const dataUrl = `data:${mimeType};base64,${inlineData.data}`;
+      
+      // Use our existing storage utility
+      const storageResult = await downloadAndStoreMedia(dataUrl, 'image', filename);
+      
+      if (storageResult.status === 'success') {
+        return {
+          fileId: storageResult.fileId,
+          filename: storageResult.filename,
+          downloadUrl: storageResult.downloadUrl,
+          externalUrl: createExternalDownloadUrl(storageResult.fileId),
+          // NEW: Enhanced metadata for multiple response support
+          responseOrder: responseOrder,
+          responseType: associatedText ? 'image_with_text' : 'image',
+          associatedText: associatedText.trim(),
+          isMultipleResponse: isMultipleResponse,
+          mimeType: mimeType,
+          sizeBytes: imageBuffer.length
+        };
+      } else {
+        throw new Error(`Storage failed: ${storageResult.error}`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ [${requestId}] Failed to save generated image with metadata:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Save generated image to our file storage system (legacy method for backward compatibility)
    */
   async saveGeneratedImage(inlineData, requestId, imageIndex) {
     try {

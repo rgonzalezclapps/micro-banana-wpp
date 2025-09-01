@@ -34,37 +34,196 @@ router.post('/', async (req, res) => {
   const requestId = `req_${Math.random().toString(36).substr(2, 9)}`;
   console.log(`\n🚀 [${requestId}] Webhook received from ${req.headers['user-agent'] || 'unknown'}`);
 
-  // 🔒 API Key Authentication - REQUIRED (Header, Bearer Token, or Query Parameter)
-  const providedApiKey = req.headers['x-api-key'] || 
-                        req.headers['authorization']?.replace('Bearer ', '') ||
-                        req.query.api_key ||
-                        req.query.key;
-  const expectedApiKey = process.env.API_KEY_WEBHOOK;
-  
-  if (!expectedApiKey) {
-    console.error(`❌ [${requestId}] API_KEY_WEBHOOK not configured in environment`);
-    return res.status(500).json({ 
-      error: 'WEBHOOK_MISCONFIGURED',
-      message: 'Webhook authentication not configured' 
-    });
-  }
-  
-  if (!providedApiKey || providedApiKey !== expectedApiKey) {
-    console.warn(`🚫 [${requestId}] Unauthorized webhook attempt from ${req.ip} - Invalid API key`);
-    return res.status(401).json({ 
-      error: 'UNAUTHORIZED',
-      message: 'Valid API key required. Provide via X-API-Key header, Authorization Bearer token, or ?api_key= query parameter.' 
-    });
-  }
-  
-  console.log(`🔐 [${requestId}] API key authenticated successfully`);
-
-  // TO DO ASAP - Implement supporting Clapps WhatsApp
-
   try {
-    // Detectar el proveedor del mensaje
+    // 🔍 STEP 1: Detect provider FIRST to determine authentication method
     const provider = detectProvider(req);
-    // Normalizar el mensaje al formato UltraMessage
+    console.log(`🔍 [${requestId}] Provider detected: ${provider}`);
+
+    // 🔒 STEP 2: Apply provider-specific authentication
+    if (provider === 'mercadopago') {
+      console.log(`🔐 [${requestId}] Applying MercadoPago X-Signature authentication...`);
+      
+      // MercadoPago uses X-Signature validation
+      const signature = req.headers['x-signature'];
+      const xRequestId = req.headers['x-request-id'];
+      
+      // Extract data.id from multiple possible locations (per MP documentation)
+      const dataId = req.query['data.id'] || // Query param: ?data.id=123456
+                     req.body?.data?.id ||    // Body: {"data": {"id": "123456"}}
+                     req.params?.id;          // URL param fallback
+      
+      console.log(`🔍 [${requestId}] MercadoPago auth - Headers: {
+        hasSignature: ${!!signature},
+        hasRequestId: ${!!xRequestId},
+        dataId: ${dataId || 'NOT_FOUND'},
+        queryDataId: ${req.query['data.id'] || 'NOT_FOUND'},
+        bodyDataId: ${req.body?.data?.id || 'NOT_FOUND'},
+        webhookType: ${req.body?.type || 'NOT_FOUND'},
+        hasSecretKey: ${!!process.env.MP_SECRET_KEY}
+      }`);
+      
+      // 🔍 DEEP TRACE: Log complete request details for failed webhooks
+      if (!dataId) {
+        console.log(`🔍 [${requestId}] DEEP TRACE - Complete request analysis:`);
+        console.log(`   📄 Query params:`, JSON.stringify(req.query, null, 2));
+        console.log(`   📄 Body content:`, JSON.stringify(req.body, null, 2));
+        console.log(`   📄 Headers relevant:`, {
+          'user-agent': req.headers['user-agent'],
+          'content-type': req.headers['content-type'],
+          'x-signature': req.headers['x-signature']?.substring(0, 20) + '...',
+          'x-request-id': req.headers['x-request-id']
+        });
+      }
+
+      // Validate required MP webhook elements (signature always required)
+      if (!signature || !xRequestId) {
+        const missing = [];
+        if (!signature) missing.push('x-signature');
+        if (!xRequestId) missing.push('x-request-id');
+        
+        console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_${missing.join('_')}`);
+        return res.status(401).json({ 
+          error: 'MERCADOPAGO_AUTH_FAILED',
+          message: `Missing required MercadoPago headers: ${missing.join(', ')}` 
+        });
+      }
+      
+      // 🔧 ARCHITECTURAL FIX: Handle different webhook types
+      const webhookType = req.body?.type;
+      
+      if (!dataId && webhookType === 'merchant_order') {
+        // Merchant order webhooks might not have data.id in the same format
+        console.log(`⚠️ [${requestId}] merchant_order webhook without data.id - checking alternative sources`);
+        
+        // For merchant_order, try alternative ID sources
+        const merchantOrderId = req.body?.id || 
+                               req.body?.merchant_order?.id ||
+                               req.query?.id;
+                               
+        if (merchantOrderId) {
+          console.log(`✅ [${requestId}] Found merchant_order ID: ${merchantOrderId}`);
+          // We'll handle this as a special case
+        } else {
+          console.warn(`🔍 [${requestId}] merchant_order webhook with no identifiable ID - proceeding with validation`);
+        }
+      } else if (!dataId) {
+        console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
+        return res.status(401).json({ 
+          error: 'MERCADOPAGO_AUTH_FAILED',
+          message: `Missing data.id for ${webhookType || 'unknown'} webhook` 
+        });
+      }
+
+      // MercadoPago signature validation will be done in the MP handler
+      console.log(`✅ [${requestId}] MercadoPago authentication elements validated`);
+      
+    } else {
+      console.log(`🔐 [${requestId}] Applying standard API Key authentication for provider: ${provider}`);
+      
+      // Standard providers use API Key authentication  
+      const providedApiKey = req.headers['x-api-key'] || 
+                            req.headers['authorization']?.replace('Bearer ', '') ||
+                            req.query.api_key ||
+                            req.query.key;
+      const expectedApiKey = process.env.API_KEY_WEBHOOK;
+      
+      if (!expectedApiKey) {
+        console.error(`❌ [${requestId}] API_KEY_WEBHOOK not configured in environment`);
+        return res.status(500).json({ 
+          error: 'WEBHOOK_MISCONFIGURED',
+          message: 'Webhook authentication not configured' 
+        });
+      }
+      
+      if (!providedApiKey || providedApiKey !== expectedApiKey) {
+        console.warn(`🚫 [${requestId}] Unauthorized webhook attempt from ${req.ip} - Invalid API key`);
+        return res.status(401).json({ 
+          error: 'UNAUTHORIZED',
+          message: 'Valid API key required. Provide via X-API-Key header, Authorization Bearer token, or ?api_key= query parameter.' 
+        });
+      }
+      
+      console.log(`✅ [${requestId}] API key authenticated successfully for ${provider}`);
+    }
+    
+    // Manejar MercadoPago webhooks separadamente
+    if (provider === 'mercadopago') {
+      console.log(`💳 [${requestId}] Processing authenticated MercadoPago webhook`);
+      
+      const mercadopagoService = require('../services/mercadopagoService');
+      const ultramsgService = require('../services/ultramsgService');
+      
+      // Extraer headers necesarios para validación (already extracted in auth section)
+      const signature = req.headers['x-signature'];
+      const xRequestId = req.headers['x-request-id'];
+      const dataId = req.query['data.id'] || req.body?.data?.id;
+      
+      console.log(`🔐 [${requestId}] MercadoPago webhook details:`, {
+        type: req.body.type,
+        action: req.body.action,
+        dataIdFromQuery: req.query['data.id'],
+        dataIdFromBody: req.body.data?.id,
+        finalDataId: dataId,
+        liveMode: req.body.live_mode,
+        userId: req.body.user_id,
+        hasSignature: !!signature,
+        hasRequestId: !!xRequestId,
+        mpSecretConfigured: !!process.env.MP_SECRET_KEY
+      });
+      
+      // Procesar notificación de MercadoPago con signature validation
+      const result = await mercadopagoService.processWebhookNotification(
+        req.body,
+        signature,
+        xRequestId
+      );
+      
+      console.log(`📊 [${requestId}] MercadoPago processing result:`, result);
+      
+      // Enviar mensaje de confirmación si el pago fue acreditado
+      if (result.success && result.action === 'credited') {
+        try {
+          console.log(`📨 [${requestId}] Sending payment confirmation message...`);
+          
+          // Buscar agent activo para este participant
+          const { Agent, ParticipantAgentAssociation } = require('../models');
+          
+          const association = await ParticipantAgentAssociation.findOne({
+            where: { participantId: result.participantId },
+            include: [{
+              model: Agent,
+              where: { status: 'Ready' }
+            }]
+          });
+          
+          if (association && association.Agent) {
+            const confirmationMessage = `✅ ¡Pago confirmado!\n\nHemos registrado tu pago por $${result.amount} ARS y acreditado ${result.creditsAdded} créditos a tu cuenta.\n\n💰 Saldo actual: ${result.newBalance} créditos`;
+            
+            await ultramsgService.sendUltraMsg(
+              association.Agent,
+              result.phoneNumber,
+              confirmationMessage
+            );
+            
+            console.log(`✅ [${requestId}] Payment confirmation sent successfully`);
+          } else {
+            console.warn(`⚠️ [${requestId}] No active agent found for participant ${result.participantId}`);
+          }
+          
+        } catch (messageError) {
+          console.error(`❌ [${requestId}] Error sending payment confirmation:`, messageError);
+          // No fallar el webhook por error de mensaje
+        }
+      }
+      
+      // Responder OK a MercadoPago
+      return res.status(200).json({ 
+        message: 'MercadoPago webhook processed',
+        result: result.success ? 'success' : 'failed'
+      });
+    }
+    
+    // Normalizar el mensaje al formato UltraMessage para otros proveedores
     let normalizedBody;
     try {
       normalizedBody = normalizeMessage(req, provider);
@@ -310,5 +469,57 @@ function cleanupProcessedMessageIds() {
 
 // Run cleanup every 5 minutes
 setInterval(cleanupProcessedMessageIds, 300000);
+
+// ============================================================================
+// MercadoPago Return URLs - Basic endpoints to prevent 404s
+// ============================================================================
+
+router.get('/payment-success', (req, res) => {
+  console.log('✅ MercadoPago payment success return:', req.query);
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Pago Exitoso</title><meta charset="utf-8"></head>
+    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+      <h1 style="color: #00a650;">¡Pago Exitoso!</h1>
+      <p>Tu pago ha sido procesado correctamente.</p>
+      <p>Recibirás una confirmación por WhatsApp en breve.</p>
+      <p><small>Puedes cerrar esta ventana.</small></p>
+    </body>
+    </html>
+  `);
+});
+
+router.get('/payment-failure', (req, res) => {
+  console.log('❌ MercadoPago payment failure return:', req.query);
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Error en el Pago</title><meta charset="utf-8"></head>
+    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+      <h1 style="color: #d32f2f;">Error en el Pago</h1>
+      <p>Hubo un problema procesando tu pago.</p>
+      <p>Por favor, intenta nuevamente más tarde.</p>
+      <p><small>Puedes cerrar esta ventana.</small></p>
+    </body>
+    </html>
+  `);
+});
+
+router.get('/payment-pending', (req, res) => {
+  console.log('⏳ MercadoPago payment pending return:', req.query);
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Pago Pendiente</title><meta charset="utf-8"></head>
+    <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+      <h1 style="color: #ff9800;">Pago Pendiente</h1>
+      <p>Tu pago está siendo procesado.</p>
+      <p>Te notificaremos por WhatsApp cuando se confirme.</p>
+      <p><small>Puedes cerrar esta ventana.</small></p>
+    </body>
+    </html>
+  `);
+});
 
 module.exports = router;

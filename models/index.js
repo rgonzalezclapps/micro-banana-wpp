@@ -23,6 +23,7 @@ db.Agent = require('./Agent')(sequelize, Sequelize.DataTypes);
 db.Client = require('./Client')(sequelize, Sequelize.DataTypes);
 db.Participant = require('./Participant')(sequelize, Sequelize.DataTypes);
 db.ParticipantAgentAssociation = require('./ParticipantAgentAssociation')(sequelize, Sequelize.DataTypes);
+db.Payment = require('./Payment')(sequelize, Sequelize.DataTypes);
 
 Object.keys(db).forEach(modelName => {
   if (db[modelName].associate) {

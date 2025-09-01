@@ -5,6 +5,7 @@ const audioTranscriber = require('./audioTranscriber');
 const { chunkMessage } = require('../utils/messageUtils');
 const moment = require('moment-timezone');
 const { sendUltraMsg, sendUltraMsgSmart } = require('../services/ultramsgService');
+const sequentialMessageService = require('../services/sequentialMessageService');
 const { sendWhatsAppBusinessMessage } = require('../services/whatsappBusinessService');
 const { transcribeAudioWithTimeout } = require('./audioTranscriber');
 const { redisClient } = require('../database');
@@ -484,7 +485,18 @@ class MessageQueue {
                           textResponse: response.message,
                           generatedImages: imageToolResult.result.generatedImages
                         };
-                        messageResponse = await sendUltraMsgSmart(agent, conversation.phoneNumber, smartContent, messageToQuote);
+                        
+                        console.log(`📤 [SEQUENTIAL] Using sequential delivery for quoted message with images`);
+                        const sequentialResult = await sequentialMessageService.sendMultipleGeminiResults(
+                          agent, 
+                          conversation.phoneNumber, 
+                          smartContent, 
+                          `queue-${conversation._id}`
+                        );
+                        
+                        // Format response for compatibility
+                        const firstDelivery = sequentialResult[0];
+                        messageResponse = firstDelivery?.result || { sent: 'false', message: 'Sequential delivery failed' };
                       } else {
                         messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message, messageToQuote);
                       }
@@ -514,21 +526,35 @@ class MessageQueue {
                   );
                   
                   if (imageToolResult && imageToolResult.result) {
-                    const smartContent = {
-                      textResponse: response.message,
-                      generatedImages: imageToolResult.result.generatedImages
-                    };
-                    
-                    messageResponse = await sendUltraMsgSmart(agent, conversation.phoneNumber, smartContent);
+                                      const smartContent = {
+                    textResponse: response.message,
+                    generatedImages: imageToolResult.result.generatedImages
+                  };
+                  
+                  console.log(`📤 [SEQUENTIAL] Using sequential delivery for multiple outputs`);
+                  const sequentialResult = await sequentialMessageService.sendMultipleGeminiResults(
+                    agent, 
+                    conversation.phoneNumber, 
+                    smartContent, 
+                    `queue-${conversation._id}`
+                  );
+                  
+                  // Format response for compatibility with existing flow
+                  const successfulDeliveries = sequentialResult.filter(d => d.result.sent === 'true');
+                  if (successfulDeliveries.length > 0) {
+                    messageResponse = successfulDeliveries[0].result;
                   } else {
-                    // Fallback to regular text if image extraction fails
-                    messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                    messageResponse = { sent: 'false', message: 'All sequential deliveries failed' };
                   }
                 } else {
-                  // No images, send text normally
-                  console.log(`📝 [ULTRAMSG] Text-only response, using regular sending`);
+                  // Fallback to regular text if image extraction fails
                   messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
                 }
+              } else {
+                // No images, send text normally
+                console.log(`📝 [ULTRAMSG] Text-only response, using regular sending`);
+                messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+              }
               }
 
               if (messageResponse && messageResponse.data) {

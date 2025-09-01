@@ -13,8 +13,10 @@
  * 
  * Dependants:
  * - models/ParticipantAgentAssociation.js (references this model)
+ * - models/Payment.js (references this model for payment transactions)
  * - modules/conversationManager.js (uses this for participant management)
  * - routes/webhookRoutes.js (creates/retrieves participants)
+ * - services/mercadopagoService.js (updates credit balance on payments)
  * - models/index.js (imports and associates this model)
  */
 
@@ -32,6 +34,11 @@ module.exports = (sequelize, DataTypes) => {
     status: {
       type: DataTypes.ENUM('active', 'inactive'),
       defaultValue: 'active'
+    },
+    credit_balance: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 10000
     }
   }, {
     tableName: 'Participants',
@@ -43,6 +50,29 @@ module.exports = (sequelize, DataTypes) => {
       through: models.ParticipantAgentAssociation,
       foreignKey: 'participantId'
     });
+    
+    Participant.hasMany(models.Payment, {
+      foreignKey: 'participantId',
+      onDelete: 'CASCADE'
+    });
+  };
+
+  // Helper methods for credit management
+  Participant.prototype.addCredits = function(credits) {
+    this.credit_balance += credits;
+    return this.save();
+  };
+
+  Participant.prototype.deductCredits = function(credits) {
+    if (this.credit_balance < credits) {
+      throw new Error('Insufficient credits');
+    }
+    this.credit_balance -= credits;
+    return this.save();
+  };
+
+  Participant.prototype.hasCredits = function(credits = 1) {
+    return this.credit_balance >= credits;
   };
 
   return Participant;

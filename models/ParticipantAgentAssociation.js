@@ -25,13 +25,21 @@ const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const ParticipantAgentAssociation = sequelize.define('ParticipantAgentAssociation', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+      allowNull: false
+    },
     participantId: {
       type: DataTypes.INTEGER,
       allowNull: false,
       references: {
         model: 'Participants',
         key: 'id'
-      }
+      },
+      onDelete: 'CASCADE', // Only cascade if participant is deleted
+      onUpdate: 'CASCADE'
     },
     agentId: {
       type: DataTypes.INTEGER,
@@ -39,16 +47,46 @@ module.exports = (sequelize, DataTypes) => {
       references: {
         model: 'Agents',
         key: 'id'
-      }
+      },
+      onDelete: 'CASCADE', // Only cascade if agent is deleted  
+      onUpdate: 'CASCADE'
     },
     threadId: {
       type: DataTypes.STRING,
-      allowNull: false
+      allowNull: false,
+      unique: true // Ensure thread uniqueness
     }
   }, {
     tableName: 'ParticipantAgentAssociations',
-    underscored: false
+    underscored: false,
+    indexes: [
+      {
+        unique: true,
+        fields: ['participantId', 'agentId'],
+        name: 'unique_participant_agent_combination'
+      },
+      {
+        fields: ['threadId'],
+        name: 'idx_thread_id'
+      }
+    ]
   });
+
+  // Define associations with proper foreign key constraints
+  ParticipantAgentAssociation.associate = function(models) {
+    // Explicit foreign key definitions for better control
+    ParticipantAgentAssociation.belongsTo(models.Participant, {
+      foreignKey: 'participantId',
+      as: 'participant',
+      onDelete: 'CASCADE'
+    });
+    
+    ParticipantAgentAssociation.belongsTo(models.Agent, {
+      foreignKey: 'agentId', 
+      as: 'agent',
+      onDelete: 'CASCADE'
+    });
+  };
 
   return ParticipantAgentAssociation;
 };

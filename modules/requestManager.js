@@ -29,6 +29,52 @@ class RequestManager {
   }
 
   /**
+   * Determine which images are for the CURRENT turn vs historical images
+   * @param {Object} request - MongoDB Request document
+   * @returns {Array} Array of file IDs for current turn only
+   */
+  determineCurrentTurnImages(request) {
+    try {
+      console.log(`🔍 [${request._id}] Determining current turn images`);
+
+      // Get all image file IDs that are already in conversation history
+      const historicalImageIds = new Set();
+      
+      if (request.conversationHistory && request.conversationHistory.length > 0) {
+        for (const historyEntry of request.conversationHistory) {
+          for (const part of historyEntry.parts) {
+            if (part.type === 'image') {
+              historicalImageIds.add(part.content); // part.content is the fileId for images
+            }
+          }
+        }
+      }
+
+      // Find images in inputImages that are NOT in conversation history
+      const currentTurnImageIds = [];
+      for (const inputImage of request.inputImages) {
+        if (!historicalImageIds.has(inputImage.fileId)) {
+          currentTurnImageIds.push(inputImage.fileId);
+        }
+      }
+
+      console.log(`✅ [${request._id}] Image analysis:`, {
+        totalInputImages: request.inputImages.length,
+        historicalImages: historicalImageIds.size,
+        currentTurnImages: currentTurnImageIds.length,
+        currentTurnList: currentTurnImageIds
+      });
+
+      return currentTurnImageIds;
+
+    } catch (error) {
+      console.error(`❌ [${request._id}] Error determining current turn images:`, error.message);
+      // Fallback: assume all inputImages are current turn (old behavior)
+      return request.inputImages.map(img => img.fileId);
+    }
+  }
+
+  /**
    * Auto-discover recent images from conversation if not provided
    * @param {string} conversationId - Conversation ID to search  
    * @param {number} maxImages - Maximum images to find (default 3)
@@ -299,12 +345,16 @@ class RequestManager {
 
       try {
         // Prepare processing data
-        const imageFileIds = request.inputImages.map(img => img.fileId);
+        const allImageFileIds = request.inputImages.map(img => img.fileId);
         const allInstructions = request.instructions.concat(finalPrompt ? [finalPrompt] : []);
         const combinedPrompt = allInstructions.join('\n\n');
 
-        console.log(`🎨 [${requestId}] Sending to Gemini`, {
-          imageCount: imageFileIds.length,
+        // CRITICAL FIX: Determine which images are for CURRENT turn (not all images)
+        const currentTurnImageIds = this.determineCurrentTurnImages(request);
+
+        console.log(`🎨 [${requestId}] Sending to Gemini with proper image context`, {
+          totalImages: allImageFileIds.length,
+          currentTurnImages: currentTurnImageIds.length,
           promptLength: combinedPrompt.length,
           iteration: request.currentIteration + 1
         });
@@ -313,12 +363,12 @@ class RequestManager {
         const processingStart = Date.now();
         let geminiResult;
 
-        if (imageFileIds.length > 0) {
-          // Image processing with existing images
+        if (allImageFileIds.length > 0) {
+          // Image processing with conversation context - ENHANCED AND FIXED
           geminiResult = await googleGeminiService.processImages(
-            imageFileIds,
+            request, // Pass entire request for conversation context
             combinedPrompt,
-            request.systemPrompt,
+            currentTurnImageIds, // Pass ONLY current turn images, not all images
             requestId
           );
         } else {
@@ -336,16 +386,28 @@ class RequestManager {
           throw new Error(`Gemini processing failed: ${geminiResult.error}`);
         }
 
-        // Save generated images to request
+        // Save generated images to request - ENHANCED with multiple outputs
         if (geminiResult.generatedImages && geminiResult.generatedImages.length > 0) {
-          console.log(`💾 [${requestId}] Saving ${geminiResult.generatedImages.length} generated images`);
-          for (const generatedImage of geminiResult.generatedImages) {
-            await request.addOutputImage(
-              generatedImage.fileId,
-              generatedImage.filename,
-              geminiResult.textResponse || 'Generated image'
-            );
-          }
+          console.log(`💾 [${requestId}] Saving ${geminiResult.generatedImages.length} generated images with metadata`);
+          
+          // Use new addMultipleOutputs method for enhanced metadata
+          const outputsForSave = geminiResult.generatedImages.map(img => ({
+            fileId: img.fileId,
+            filename: img.filename,
+            geminiResponse: img.associatedText || geminiResult.textResponse || 'Generated image',
+            responseOrder: img.responseOrder || 0,
+            responseType: img.responseType || 'image',
+            associatedText: img.associatedText || '',
+            isMultipleResponse: img.isMultipleResponse || false
+          }));
+          
+          await request.addMultipleOutputs(outputsForSave);
+          
+          console.log(`✅ [${requestId}] Saved multiple outputs with enhanced metadata`, {
+            outputCount: outputsForSave.length,
+            hasMultipleResponse: outputsForSave.some(o => o.isMultipleResponse),
+            responseTypes: [...new Set(outputsForSave.map(o => o.responseType))]
+          });
         }
 
         // Add to processing history

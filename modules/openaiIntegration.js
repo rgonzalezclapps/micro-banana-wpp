@@ -1,6 +1,8 @@
 const { OpenAI } = require("openai");
 const requestManager = require('./requestManager');
 const Conversation = require('../models/Conversation');
+const { Agent } = require('../models');
+const ultramsgService = require('../services/ultramsgService');
 
 class OpenAIIntegration {
     constructor() {
@@ -271,6 +273,69 @@ class OpenAIIntegration {
         }
     }
 
+    /**
+     * Send immediate message to user via UltraMsg before processing begins
+     * @param {string} conversationId - MongoDB conversation ID
+     * @param {string} messageText - Message text to send (supports basic markdown)
+     * @returns {Promise<Object>} Send result from UltraMsg
+     */
+    async sendImmediateMessageToUser(conversationId, messageText) {
+        console.log(`📤 Sending immediate message to user in conversation: ${conversationId}`);
+        
+        try {
+            // Resolve conversation data
+            const conversation = await Conversation.findById(conversationId);
+            if (!conversation) {
+                throw new Error(`Conversation not found: ${conversationId}`);
+            }
+            
+            // Resolve agent data  
+            const agent = await Agent.findByPk(conversation.agentId);
+            if (!agent) {
+                throw new Error(`Agent not found: ${conversation.agentId}`);
+            }
+            
+            // Validate UltraMsg credentials
+            if (!agent.instanceId || !agent.token) {
+                throw new Error(`Agent ${agent.id} missing UltraMsg credentials (instanceId: ${!!agent.instanceId}, token: ${!!agent.token})`);
+            }
+            
+            // Validate phone number
+            if (!conversation.phoneNumber || conversation.phoneNumber.trim().length === 0) {
+                throw new Error(`Invalid phone number for conversation ${conversationId}: ${conversation.phoneNumber}`);
+            }
+            
+            console.log(`📱 Sending via UltraMsg to ${conversation.phoneNumber} using agent ${agent.name} (ID: ${agent.id})`);
+            
+            // Send message via UltraMsg
+            const result = await ultramsgService.sendUltraMsg(
+                agent, 
+                conversation.phoneNumber, 
+                messageText.trim()
+            );
+            
+            if (result.sent !== 'true') {
+                throw new Error(`UltraMsg send failed: ${result.message || 'Unknown error'}`);
+            }
+            
+            console.log(`✅ Immediate message sent successfully to ${conversation.phoneNumber}:`, {
+                messageLength: messageText.length,
+                agentId: agent.id,
+                responseId: result.data?.id || 'N/A'
+            });
+            
+            return result;
+            
+        } catch (error) {
+            console.error(`❌ Failed to send immediate message to user:`, {
+                conversationId,
+                error: error.message,
+                messagePreview: messageText.substring(0, 50) + (messageText.length > 50 ? '...' : '')
+            });
+            throw error;
+        }
+    }
+
     async executeToolCalls(toolCalls, conversationId) {
         console.log("Executing tool calls for conversation:", conversationId);
         const toolOutputs = [];
@@ -326,6 +391,26 @@ class OpenAIIntegration {
                     case "processRequest":
                         console.log(`⚡ Processing request ${parsedArgs.requestId} with Google Gemini`);
                         
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message before processing: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with processing
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    requestId: parsedArgs.requestId,
+                                    conversationId
+                                });
+                                // Continue with processing - don't fail the entire request
+                            }
+                        }
+                        
+                        // Continue with normal processing
                         output = await requestManager.processRequest(
                             parsedArgs.requestId,
                             parsedArgs.finalPrompt || ''
@@ -352,6 +437,134 @@ class OpenAIIntegration {
                         console.log(`❌ Cancelling request ${parsedArgs.requestId}`);
                         
                         output = await requestManager.cancelRequest(parsedArgs.requestId);
+                        break;
+
+                    // ============================================================================
+                    // Payment System - MercadoPago Integration
+                    // ============================================================================
+
+                    case "createTopupLink":
+                        console.log(`💳 Creating MercadoPago topup link for conversation ${conversationId}`);
+                        
+                        try {
+                            const mercadopagoService = require('../services/mercadopagoService');
+                            const { Payment, Participant } = require('../models');
+                            
+                            // Find participant by conversation
+                            const conversation = await Conversation.findById(conversationId);
+                            if (!conversation) {
+                                throw new Error('Conversation not found');
+                            }
+                            
+                            const participant = await Participant.findByPk(conversation.participantId);
+                            if (!participant) {
+                                throw new Error('Participant not found');
+                            }
+                            
+                            // Validate input parameters
+                            const { amount_ars, credits, note, idempotency_key } = parsedArgs;
+                            
+                            if (!amount_ars || !credits || !idempotency_key) {
+                                throw new Error('Missing required parameters: amount_ars, credits, and idempotency_key are required');
+                            }
+                            
+                            // Validate 1:1 conversion
+                            if (amount_ars !== credits) {
+                                throw new Error('amount_ars and credits must be equal (1 ARS = 1 credit)');
+                            }
+                            
+                            // Check for duplicate idempotency key
+                            const existingPayment = await Payment.findOne({
+                                where: { idempotency_key: idempotency_key }
+                            });
+                            
+                            if (existingPayment) {
+                                // Return existing payment link if already created
+                                output = {
+                                    success: true,
+                                    duplicate: true,
+                                    message: "Link de pago ya generado con este ID",
+                                    payment_id: existingPayment.id,
+                                    status: existingPayment.status
+                                };
+                                break;
+                            }
+                            
+                            // Create payment record in 'new' status
+                            const payment = await Payment.create({
+                                participantId: participant.id,
+                                amount: amount_ars,
+                                credits: credits,
+                                note: note || `Recarga de ${credits} créditos`,
+                                idempotency_key: idempotency_key,
+                                status: 'new'
+                            });
+                            
+                            console.log(`💾 Payment created in database:`, {
+                                paymentId: payment.id,
+                                participantId: participant.id,
+                                amount: payment.amount,
+                                credits: payment.credits
+                            });
+                            
+                            // Create MercadoPago preference
+                            const topupResult = await mercadopagoService.createTopupLink({
+                                amount_ars: amount_ars,
+                                credits: credits,
+                                note: note,
+                                idempotency_key: idempotency_key,
+                                participantId: participant.id
+                            });
+                            
+                            if (topupResult.error) {
+                                // Update payment status to reflect error
+                                await payment.update({ 
+                                    status: 'rejected',
+                                    metadata: { error: topupResult.details }
+                                });
+                                
+                                output = {
+                                    success: false,
+                                    error: topupResult.message,
+                                    payment_id: payment.id
+                                };
+                            } else {
+                                // Update payment with MercadoPago data and set to 'pending'
+                                await payment.update({
+                                    status: 'pending',
+                                    mp_preference_id: topupResult.preference_id,
+                                    external_reference: topupResult.external_reference,
+                                    metadata: { 
+                                        mp_response: topupResult,
+                                        created_at: new Date()
+                                    }
+                                });
+                                
+                                console.log(`✅ MercadoPago preference created successfully:`, {
+                                    preferenceId: topupResult.preference_id,
+                                    externalReference: topupResult.external_reference
+                                });
+                                
+                                output = {
+                                    success: true,
+                                    payment_link: topupResult.init_point,
+                                    payment_id: payment.id,
+                                    preference_id: topupResult.preference_id,
+                                    external_reference: topupResult.external_reference,
+                                    amount_ars: amount_ars,
+                                    credits: credits,
+                                    message: `Link de pago generado exitosamente. El usuario recibirá ${credits} créditos al completar el pago de $${amount_ars} ARS.`
+                                };
+                            }
+                            
+                        } catch (error) {
+                            console.error(`❌ Error creating topup link:`, error);
+                            output = {
+                                success: false,
+                                error: error.message,
+                                message: "Error al generar link de pago. Por favor intenta nuevamente."
+                            };
+                        }
                         break;
 
                     // ============================================================================
@@ -392,7 +605,122 @@ class OpenAIIntegration {
         }
         
         console.log(`✅ Completed ${toolOutputs.length} tool calls for conversation ${conversationId}`);
+        
+        // 🚨 CRITICAL FIX: Log tool calls in message.functionCalls for official tracking
+        try {
+            await this.logToolCallsToConversation(conversationId, toolCalls, toolOutputs);
+        } catch (loggingError) {
+            // Non-blocking: Log error but don't fail the entire tool execution
+            console.error(`⚠️ Failed to log tool calls to conversation (non-blocking):`, {
+                conversationId,
+                error: loggingError.message,
+                toolCallCount: toolCalls.length
+            });
+        }
+        
         return toolOutputs;
+    }
+
+    /**
+     * Log executed tool calls to conversation message.functionCalls for official tracking
+     * @param {string} conversationId - MongoDB conversation ID
+     * @param {Array} toolCalls - Original tool calls from OpenAI
+     * @param {Array} toolOutputs - Executed tool outputs
+     * @returns {Promise<void>}
+     */
+    async logToolCallsToConversation(conversationId, toolCalls, toolOutputs) {
+        console.log(`📝 Logging ${toolCalls.length} tool calls to conversation: ${conversationId}`);
+        
+        try {
+            // Find the conversation
+            const conversation = await Conversation.findById(conversationId);
+            if (!conversation) {
+                throw new Error(`Conversation not found: ${conversationId}`);
+            }
+            
+            if (!conversation.messages || conversation.messages.length === 0) {
+                throw new Error(`No messages found in conversation: ${conversationId}`);
+            }
+            
+            // Find the most recent user message to attach function calls
+            // This should be the message that triggered the AI response with tool calls
+            let targetMessage = null;
+            for (let i = conversation.messages.length - 1; i >= 0; i--) {
+                const msg = conversation.messages[i];
+                if (msg.sender === 'user') {
+                    targetMessage = msg;
+                    break;
+                }
+            }
+            
+            if (!targetMessage) {
+                // Fallback: use the most recent message
+                targetMessage = conversation.messages[conversation.messages.length - 1];
+                console.log(`⚠️ No user message found, using most recent message (sender: ${targetMessage.sender})`);
+            }
+            
+            // Initialize functionCalls array if it doesn't exist
+            if (!targetMessage.functionCalls) {
+                targetMessage.functionCalls = [];
+            }
+            
+            // Process each tool call
+            for (let i = 0; i < toolCalls.length; i++) {
+                const toolCall = toolCalls[i];
+                const toolOutput = toolOutputs[i];
+                
+                try {
+                    const parsedArgs = JSON.parse(toolCall.function.arguments);
+                    const parsedOutput = JSON.parse(toolOutput.output);
+                    
+                    // Create function call record according to schema
+                    const functionCallRecord = {
+                        type: 'function', // Default per schema
+                        name: toolCall.function.name,
+                        parameters: parsedArgs, // Original parameters sent to function
+                        updates: [parsedOutput] // Array of execution results
+                    };
+                    
+                    // Add to message functionCalls array
+                    targetMessage.functionCalls.push(functionCallRecord);
+                    
+                    console.log(`📝 Logged tool call: ${toolCall.function.name} with ${Object.keys(parsedArgs).length} parameters`);
+                    
+                } catch (parseError) {
+                    console.error(`❌ Failed to parse tool call ${i}:`, {
+                        toolName: toolCall.function.name,
+                        error: parseError.message
+                    });
+                    
+                    // Still log what we can
+                    const fallbackRecord = {
+                        type: 'function',
+                        name: toolCall.function.name,
+                        parameters: { error: 'Failed to parse arguments', raw: toolCall.function.arguments },
+                        updates: [{ error: 'Failed to parse output', raw: toolOutput.output }]
+                    };
+                    
+                    targetMessage.functionCalls.push(fallbackRecord);
+                }
+            }
+            
+            // Save the updated conversation
+            await conversation.save();
+            
+            console.log(`✅ Successfully logged ${toolCalls.length} tool calls to message in conversation ${conversationId}:`, {
+                messageTimestamp: targetMessage.timestamp,
+                messageSender: targetMessage.sender,
+                totalFunctionCalls: targetMessage.functionCalls.length
+            });
+            
+        } catch (error) {
+            console.error(`❌ Error logging tool calls to conversation:`, {
+                conversationId,
+                error: error.message,
+                toolCallCount: toolCalls.length
+            });
+            throw error;
+        }
     }
 }
 

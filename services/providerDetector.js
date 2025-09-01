@@ -1,16 +1,34 @@
 // services/providerDetector.js
 /**
- * Servicio para detectar el proveedor de mensajes WhatsApp
- * Determina si un mensaje proviene de UltraMessage o WhatsApp Factory API
+ * Servicio para detectar el proveedor de mensajes WhatsApp y webhooks de pago
+ * Determina si un mensaje proviene de UltraMessage, WhatsApp Factory API o MercadoPago
  */
 
 /**
  * Detecta el proveedor basado en la estructura del mensaje
  * @param {Object} req - Request object con headers y body
- * @returns {string} - 'ultramsg' | 'whatsapp-factory'
+ * @returns {string} - 'ultramsg' | 'whatsapp-factory' | 'mercadopago'
  */
 function detectProvider(req) {
   const { headers, body } = req;
+  
+  // Detectar MercadoPago Webhook
+  // Características distintivas:
+  // 1. Headers específicos de MercadoPago
+  if (headers['x-signature'] && headers['x-request-id']) {
+    return 'mercadopago';
+  }
+  
+  // 2. Estructura típica de notificación MP
+  if (body && body.type && body.data && body.data.id && 
+      (body.type === 'payment' || body.type === 'merchant_order')) {
+    return 'mercadopago';
+  }
+  
+  // 3. Live mode y user_id típicos de MP
+  if (body && typeof body.live_mode === 'boolean' && body.user_id && body.api_version) {
+    return 'mercadopago';
+  }
   
   // Detectar WhatsApp Factory API
   // Características distintivas:
@@ -64,8 +82,18 @@ function isUltraMessage(req) {
   return detectProvider(req) === 'ultramsg';
 }
 
+/**
+ * Verifica si una notificación es de MercadoPago
+ * @param {Object} req - Request object
+ * @returns {boolean}
+ */
+function isMercadoPago(req) {
+  return detectProvider(req) === 'mercadopago';
+}
+
 module.exports = {
   detectProvider,
   isWhatsAppFactory,
-  isUltraMessage
+  isUltraMessage,
+  isMercadoPago
 };
