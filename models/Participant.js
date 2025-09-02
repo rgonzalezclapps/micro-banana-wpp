@@ -35,7 +35,7 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.ENUM('active', 'inactive'),
       defaultValue: 'active'
     },
-    credit_balance: {
+    creditBalance: {
       type: DataTypes.INTEGER,
       allowNull: false,
       defaultValue: 10000
@@ -59,20 +59,20 @@ module.exports = (sequelize, DataTypes) => {
 
   // Helper methods for credit management
   Participant.prototype.addCredits = function(credits) {
-    this.credit_balance += credits;
+    this.creditBalance += credits;
     return this.save();
   };
 
   Participant.prototype.deductCredits = function(credits) {
-    if (this.credit_balance < credits) {
+    if (this.creditBalance < credits) {
       throw new Error('Insufficient credits');
     }
-    this.credit_balance -= credits;
+    this.creditBalance -= credits;
     return this.save();
   };
 
   Participant.prototype.hasCredits = function(credits = 1) {
-    return this.credit_balance >= credits;
+    return this.creditBalance >= credits;
   };
 
   return Participant;

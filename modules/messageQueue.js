@@ -85,6 +85,69 @@ class MessageQueue {
 
     placeholder.transcriptionInProgress = true;
     
+    // 🚀 NEW FEATURE: Send immediate message to user when audio transcription begins
+    try {
+      const audioMessages = [
+        "Estoy escuchando tu audio 🎧",
+        "Recibido. Escuchando y te contesto 🔊",
+        "Tu audio se escucha claro, procesando 📱",
+        "Dale, escuchando tu mensaje 🎤",
+        "Recibido tu audio, ya lo proceso 🎵",
+        "Estoy procesando tu mensaje de voz 👂",
+        "Tu audio llegó perfecto, escuchando ⚡",
+        "Recibido y escuchando tu mensaje 🔄",
+        "Estoy escuchando tu audio 🎯",
+        "Procesando tu mensaje de voz 🎶",
+        "Escuchando lo que me dijiste 🎧",
+        "Procesando tu audio 📻",
+        "Estoy escuchando tu mensaje 👂",
+        "Recibido, estoy escuchando 🎵",
+        "Escuchando tu audio 🔊",
+        "Escuchando tu mensaje completo 🎤",
+        "Estoy procesando lo que me contaste 💫",
+        "Escuchando tu audio 🎨",
+        "Recibido y procesando tu voz 🌟",
+        "Estoy escuchando cada palabra 🎪"
+      ];
+      
+      const randomMessage = audioMessages[Math.floor(Math.random() * audioMessages.length)];
+      
+      console.log(`📤 Sending immediate audio processing message: "${randomMessage}"`);
+      
+      // FIX: Use conversation.phoneNumber instead of placeholder.from
+      const phoneNumber = conversation.phoneNumber || placeholder.ultraMsgData?.from || placeholder.from;
+      
+      if (!phoneNumber) {
+        throw new Error('Phone number not available for audio notification');
+      }
+      
+      // Get agent info for sending message
+      if (agent) {
+        // For agent-based messages (WhatsApp Factory)
+        const { sendUltraMsg } = require('../services/ultramsgService');
+        await sendUltraMsg(agent, phoneNumber, randomMessage);
+      } else {
+        // For UltraMsg messages, try to get agent from conversation
+        const conversationAgent = await Agent.findByPk(conversation.agentId);
+        if (conversationAgent) {
+          const { sendUltraMsg } = require('../services/ultramsgService');
+          await sendUltraMsg(conversationAgent, phoneNumber, randomMessage);
+        }
+      }
+      
+      console.log(`✅ Audio processing notification sent to user: ${phoneNumber}`);
+      
+    } catch (messageError) {
+      // Non-blocking: Continue with transcription even if message fails
+      console.error(`⚠️ Failed to send audio processing notification (non-blocking):`, {
+        error: messageError.message,
+        conversationId: conversation._id.toString(),
+        phoneNumber: conversation.phoneNumber,
+        placeholderFrom: placeholder.from,
+        ultraMsgFrom: placeholder.ultraMsgData?.from
+      });
+    }
+    
     // Update the placeholder in the queue
     const placeholderIndex = queue.findIndex(msg => 
       msg.ultraMsgData && 

@@ -446,6 +446,25 @@ class OpenAIIntegration {
                     case "createTopupLink":
                         console.log(`💳 Creating MercadoPago topup link for conversation ${conversationId}`);
                         
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message before payment link creation: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with payment processing
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    paymentContext: 'createTopupLink'
+                                });
+                                // Continue with payment processing - don't fail the entire request
+                            }
+                        }
+                        
                         try {
                             const mercadopagoService = require('../services/mercadopagoService');
                             const { Payment, Participant } = require('../models');
@@ -462,10 +481,10 @@ class OpenAIIntegration {
                             }
                             
                             // Validate input parameters
-                            const { amount_ars, credits, note, idempotency_key } = parsedArgs;
+                            const { amount_ars, credits, note, idempotencyKey } = parsedArgs;
                             
-                            if (!amount_ars || !credits || !idempotency_key) {
-                                throw new Error('Missing required parameters: amount_ars, credits, and idempotency_key are required');
+                            if (!amount_ars || !credits || !idempotencyKey) {
+                                throw new Error('Missing required parameters: amount_ars, credits, and idempotencyKey are required');
                             }
                             
                             // Validate 1:1 conversion
@@ -475,7 +494,7 @@ class OpenAIIntegration {
                             
                             // Check for duplicate idempotency key
                             const existingPayment = await Payment.findOne({
-                                where: { idempotency_key: idempotency_key }
+                                where: { idempotencyKey: idempotencyKey }
                             });
                             
                             if (existingPayment) {
@@ -496,7 +515,7 @@ class OpenAIIntegration {
                                 amount: amount_ars,
                                 credits: credits,
                                 note: note || `Recarga de ${credits} créditos`,
-                                idempotency_key: idempotency_key,
+                                idempotencyKey: idempotencyKey,
                                 status: 'new'
                             });
                             
@@ -512,7 +531,7 @@ class OpenAIIntegration {
                                 amount_ars: amount_ars,
                                 credits: credits,
                                 note: note,
-                                idempotency_key: idempotency_key,
+                                idempotencyKey: idempotencyKey,
                                 participantId: participant.id
                             });
                             
@@ -563,6 +582,76 @@ class OpenAIIntegration {
                                 success: false,
                                 error: error.message,
                                 message: "Error al generar link de pago. Por favor intenta nuevamente."
+                            };
+                        }
+                        break;
+
+                    // ============================================================================
+                    // Credit Balance Query - Check User Credits  
+                    // ============================================================================
+
+                    case "check_credits":
+                    case "checkCredits":
+                        console.log(`💰 Checking credit balance for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message before credit check: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with credit check
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    creditContext: 'checkCredits'
+                                });
+                                // Continue with credit check - don't fail the entire request
+                            }
+                        }
+                        
+                        try {
+                            const { Participant } = require('../models');
+                            
+                            // Find participant by conversation
+                            const conversation = await Conversation.findById(conversationId);
+                            if (!conversation) {
+                                throw new Error('Conversation not found');
+                            }
+                            
+                            const participant = await Participant.findByPk(conversation.participantId);
+                            if (!participant) {
+                                throw new Error('Participant not found');
+                            }
+                            
+                            console.log(`💰 Credit balance query for participant ${participant.id}:`, {
+                                participantId: participant.id,
+                                name: participant.name,
+                                phoneNumber: participant.phoneNumber,
+                                currentBalance: participant.creditBalance
+                            });
+                            
+                            output = {
+                                success: true,
+                                participant_id: participant.id,
+                                name: participant.name,
+                                phone_number: participant.phoneNumber,
+                                credit_balance: participant.creditBalance,
+                                formatted_balance: `${participant.creditBalance.toLocaleString('es-AR')} créditos`,
+                                message: `Balance actual: ${participant.creditBalance.toLocaleString('es-AR')} créditos disponibles`
+                            };
+                            
+                        } catch (error) {
+                            console.error('❌ Error checking credit balance:', error);
+                            
+                            output = {
+                                success: false,
+                                error: error.message || 'Error checking credit balance',
+                                credit_balance: 0,
+                                message: 'No se pudo consultar el balance de créditos'
                             };
                         }
                         break;

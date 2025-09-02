@@ -55,15 +55,15 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false
     },
     // MercadoPago Integration Fields
-    mp_payment_id: {
+    mpPaymentId: {
       type: DataTypes.STRING,
       allowNull: true
     },
-    mp_preference_id: {
+    mpPreferenceId: {
       type: DataTypes.STRING,
       allowNull: true
     },
-    external_reference: {
+    externalReference: {
       type: DataTypes.STRING,
       allowNull: true,
       unique: true
@@ -73,7 +73,7 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.STRING(120),
       allowNull: true
     },
-    idempotency_key: {
+    idempotencyKey: {
       type: DataTypes.STRING,
       allowNull: false,
       unique: true
@@ -85,11 +85,11 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: {}
     },
     // Payment Processing Timestamps
-    approved_at: {
+    approvedAt: {
       type: DataTypes.DATE,
       allowNull: true
     },
-    credited_at: {
+    creditedAt: {
       type: DataTypes.DATE,
       allowNull: true
     }
@@ -104,13 +104,13 @@ module.exports = (sequelize, DataTypes) => {
         fields: ['status']
       },
       {
-        fields: ['mp_payment_id']
+        fields: ['mpPaymentId']
       },
       {
-        fields: ['external_reference']
+        fields: ['externalReference']
       },
       {
-        fields: ['idempotency_key']
+        fields: ['idempotencyKey']
       }
     ]
   });
@@ -125,20 +125,20 @@ module.exports = (sequelize, DataTypes) => {
   // Helper methods for payment lifecycle
   Payment.prototype.markAsPending = function(mpPaymentId, mpPreferenceId) {
     this.status = 'pending';
-    this.mp_payment_id = mpPaymentId;
-    this.mp_preference_id = mpPreferenceId;
+    this.mpPaymentId = mpPaymentId;
+    this.mpPreferenceId = mpPreferenceId;
     return this.save();
   };
 
   Payment.prototype.markAsApproved = function(metadata = {}) {
     this.status = 'approved';
-    this.approved_at = new Date();
+    this.approvedAt = new Date();
     this.metadata = { ...this.metadata, ...metadata };
     return this.save();
   };
 
   Payment.prototype.markAsCredited = function() {
-    this.credited_at = new Date();
+    this.creditedAt = new Date();
     return this.save();
   };
 

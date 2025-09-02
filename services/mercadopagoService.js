@@ -44,7 +44,7 @@ class MercadoPagoService {
    * @param {number} topupData.amount_ars Amount in Argentine Pesos
    * @param {number} topupData.credits Number of credits to add
    * @param {string} topupData.note Optional note for the payment
-   * @param {string} topupData.idempotency_key UUID v4 for deduplication
+   * @param {string} topupData.idempotencyKey UUID v4 for deduplication
    * @param {number} topupData.participantId Internal participant ID
    * @returns {Promise<Object>} MercadoPago preference response with init_point
    */
@@ -53,12 +53,12 @@ class MercadoPagoService {
       amount: topupData.amount_ars,
       credits: topupData.credits,
       participantId: topupData.participantId,
-      idempotencyKey: topupData.idempotency_key
+      idempotencyKey: topupData.idempotencyKey
     });
 
     try {
       // Generate external reference for tracking
-      const externalReference = `topup_${topupData.idempotency_key}`;
+      const externalReference = `topup_${topupData.idempotencyKey}`;
       
       // Create preference payload for MercadoPago Checkout Pro
       const preferencePayload = {
@@ -72,7 +72,7 @@ class MercadoPagoService {
         metadata: {
           participant_id: topupData.participantId,
           credits: topupData.credits,
-          idempotency_key: topupData.idempotency_key
+          idempotency_key: topupData.idempotencyKey
         },
         notification_url: `${process.env.WEBHOOK_BASE_URL || 'https://api-ai-mvp.com'}/api/webhook`,
         auto_return: "approved",
@@ -318,7 +318,7 @@ class MercadoPagoService {
 
       // Find our internal payment record
       const payment = await Payment.findOne({
-        where: { external_reference: paymentInfo.external_reference }
+        where: { externalReference: paymentInfo.external_reference }
       });
 
       if (!payment) {
@@ -362,7 +362,7 @@ class MercadoPagoService {
             phoneNumber: participant.phoneNumber,
             creditsAdded: payment.credits,
             amount: payment.amount,
-            newBalance: participant.credit_balance
+            newBalance: participant.creditBalance
           };
         }
 
