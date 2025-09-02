@@ -657,6 +657,124 @@ class OpenAIIntegration {
                         break;
 
                     // ============================================================================
+                    // Video Generation - Vertex AI Veo 3.0 Integration
+                    // ============================================================================
+
+                    case "videoGenerator":
+                        console.log(`🎬 Generating video using Vertex AI Veo 3.0 for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user about video processing time
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate video processing message: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with video generation
+                                console.error(`⚠️ Failed to send immediate video message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    videoContext: 'videoGenerator'
+                                });
+                                // Continue with video generation - don't fail the entire request
+                            }
+                        }
+                        
+                        try {
+                            const { vertexVideoService } = require('../services/vertexVideoService');
+                            
+                            // Validate input parameters
+                            const { prompt, imageFileId } = parsedArgs;
+                            
+                            if (!prompt || typeof prompt !== 'string') {
+                                throw new Error('Missing required parameter: prompt is required and must be a string');
+                            }
+                            
+                            if (!imageFileId || typeof imageFileId !== 'string') {
+                                throw new Error('Missing required parameter: imageFileId is required for video generation');
+                            }
+                            
+                            // Validate options with service
+                            const validation = vertexVideoService.validateOptions({
+                                prompt: prompt,
+                                imageFileId: imageFileId
+                            });
+                            
+                            if (!validation.valid) {
+                                throw new Error(`Invalid video generation parameters: ${validation.errors.join(', ')}`);
+                            }
+                            
+                            console.log('🎯 Video generation request validated:', {
+                                prompt: prompt.substring(0, 100) + (prompt.length > 100 ? '...' : ''),
+                                hasImage: !!imageFileId,
+                                imageFileId: imageFileId || 'none'
+                            });
+                            
+                            // Generate video using Vertex AI (sync mode, Veo 3.0)
+                            const videoResult = await vertexVideoService.generateVideoWithRetry({
+                                prompt: prompt,
+                                imageFileId: imageFileId,
+                                mode: 'sync', // Always sync as requested
+                                model: 'veo-3.0-generate-preview' // Always Veo 3 as requested
+                            });
+                            
+                            if (videoResult.success) {
+                                console.log(`🎥 Video generated successfully:`, {
+                                    executionTime: videoResult.executionTime,
+                                    model: videoResult.model,
+                                    hasVideoUrl: !!videoResult.videoUrl,
+                                    hasDownloadUrl: !!videoResult.downloadUrl,
+                                    imageUsed: videoResult.imageUsed,
+                                    retriesUsed: videoResult.retriesUsed || 0
+                                });
+                                
+                                output = {
+                                    success: true,
+                                    message: `Video generado exitosamente usando ${videoResult.model}`,
+                                    video_url: videoResult.videoUrl,
+                                    download_url: videoResult.downloadUrl,
+                                    execution_time: videoResult.executionTime,
+                                    model_used: videoResult.model,
+                                    prompt_used: prompt,
+                                    image_used: !!imageFileId,
+                                    processing_mode: 'sync',
+                                    retries_used: videoResult.retriesUsed || 0
+                                };
+                            } else {
+                                // Service returned error response
+                                console.error('❌ Video generation failed:', {
+                                    error: videoResult.error,
+                                    errorCode: videoResult.errorCode,
+                                    prompt: prompt.substring(0, 100)
+                                });
+                                
+                                output = {
+                                    success: false,
+                                    error: videoResult.error || 'Error generating video',
+                                    error_code: videoResult.errorCode || 'GENERATION_FAILED',
+                                    message: 'No se pudo generar el video. Intenta con un prompt más simple o una imagen diferente.',
+                                    prompt_used: prompt,
+                                    image_used: !!imageFileId
+                                };
+                            }
+                            
+                        } catch (error) {
+                            console.error('❌ Error in video generation tool:', error);
+                            
+                            output = {
+                                success: false,
+                                error: error.message || 'Error generating video',
+                                error_code: 'TOOL_ERROR',
+                                message: 'Hubo un error generando tu video. Por favor intenta nuevamente con un prompt diferente.',
+                                prompt_used: parsedArgs.prompt || 'unknown',
+                                image_used: !!parsedArgs.imageFileId
+                            };
+                        }
+                        break;
+
+                    // ============================================================================
                     // Default case for unimplemented functions
                     // ============================================================================
                     

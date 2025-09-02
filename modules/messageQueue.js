@@ -4,7 +4,7 @@ const openAIIntegration = require('./openaiIntegration');
 const audioTranscriber = require('./audioTranscriber');
 const { chunkMessage } = require('../utils/messageUtils');
 const moment = require('moment-timezone');
-const { sendUltraMsg, sendUltraMsgSmart } = require('../services/ultramsgService');
+const { sendUltraMsg, sendUltraMsgSmart, sendUltraMsgVideo } = require('../services/ultramsgService');
 const sequentialMessageService = require('../services/sequentialMessageService');
 const { sendWhatsAppBusinessMessage } = require('../services/whatsappBusinessService');
 const { transcribeAudioWithTimeout } = require('./audioTranscriber');
@@ -575,12 +575,85 @@ class MessageQueue {
                   }
                 }
               } else {
-                // 🔧 SMART RESPONSE ROUTING: Check if response contains generated images
+                // 🔧 SMART RESPONSE ROUTING: Check if response contains generated content (images or videos)
                 const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => 
                   tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
                 );
+                
+                const hasGeneratedVideo = result.toolResults && result.toolResults.some(tool => {
+                  console.log('🔍 [VIDEO-TRACE] Checking tool result for video (destructured):', {
+                    toolKeys: Object.keys(tool),
+                    hasVideoUrl: !!tool.video_url,
+                    hasDownloadUrl: !!tool.download_url,
+                    success: tool.success,
+                    toolCallId: tool.tool_call_id
+                  });
+                  return tool.video_url || tool.download_url;
+                });
 
-                if (hasGeneratedImages) {
+                console.log('🔍 [VIDEO-TRACE] Video detection result:', {
+                  hasGeneratedVideo: hasGeneratedVideo,
+                  toolResultsCount: result.toolResults?.length || 0
+                });
+
+                if (hasGeneratedVideo) {
+                  console.log(`🎥 [ULTRAMSG] Response contains generated video, using video delivery`);
+                  
+                  // Extract video content from tool results (destructured format)
+                  const videoToolResult = result.toolResults.find(tool => {
+                    console.log('🔍 [VIDEO-TRACE] Found video tool result (destructured):', {
+                      hasVideoUrl: !!tool.video_url,
+                      hasDownloadUrl: !!tool.download_url,
+                      videoUrlLength: tool.video_url?.length || 0,
+                      downloadUrlLength: tool.download_url?.length || 0
+                    });
+                    return tool.video_url || tool.download_url;
+                  });
+                  
+                  if (videoToolResult) {
+                    try {
+                      // Tool result is already destructured, no need to parse
+                      const videoUrl = videoToolResult.download_url || videoToolResult.video_url;
+                      const videoCaption = response.message || videoToolResult.message || '';
+                      
+                      console.log(`🎥 [ULTRAMSG] Sending generated video:`, {
+                        hasVideoUrl: !!videoUrl,
+                        captionLength: videoCaption.length,
+                        executionTime: videoToolResult.execution_time
+                      });
+                      
+                      console.log('🎬 [VIDEO-TRACE] About to send video via UltraMsg:', {
+                        agentId: agent.id,
+                        phoneNumber: conversation.phoneNumber,
+                        videoUrl: videoUrl?.substring(0, 80) + (videoUrl?.length > 80 ? '...' : ''),
+                        captionLength: videoCaption.length
+                      });
+                      
+                      messageResponse = await sendUltraMsgVideo(
+                        agent, 
+                        conversation.phoneNumber, 
+                        videoUrl,
+                        videoCaption,
+                        {
+                          priority: 3,
+                          referenceId: `generated_video_${Date.now()}`
+                        }
+                      );
+                      
+                      console.log('✅ [VIDEO-TRACE] Generated video sent successfully via UltraMsg:', {
+                        responseId: messageResponse?.data?.id || messageResponse?.id,
+                        status: messageResponse?.data?.sent || messageResponse?.sent,
+                        hasDataWrapper: !!messageResponse?.data
+                      });
+                      
+                    } catch (videoError) {
+                      console.error('❌ Failed to send generated video, falling back to text:', videoError.message);
+                      // Fallback to text message
+                      messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                    }
+                  }
+                  
+                } else if (hasGeneratedImages) {
                   console.log(`🖼️ [ULTRAMSG] Response contains generated images, using smart sending`);
                   
                   // Extract image content from tool results

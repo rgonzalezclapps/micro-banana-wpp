@@ -208,9 +208,134 @@ async function sendUltraMsgSmart(agent, to, content, messageToQuote = '') {
   }
 }
 
+/**
+ * Send video message through UltraMsg WhatsApp API
+ * @param {Object} agent Agent object with instanceId and token
+ * @param {string} to WhatsApp phone number (e.g., "5491123500639")
+ * @param {string} videoUrl URL of the video to send (from file storage)
+ * @param {string} caption Optional caption for the video
+ * @param {Object} options Additional sending options
+ * @returns {Promise<Object>} UltraMsg API response
+ */
+async function sendUltraMsgVideo(agent, to, videoUrl, caption = '', options = {}) {
+  console.log(`🎥 [ULTRAMSG-VIDEO] Preparing to send video to ${to}`, {
+    agentId: agent.id,
+    agentName: agent.name,
+    instanceId: agent.instanceId,
+    hasCaption: !!caption,
+    videoUrl: videoUrl?.substring(0, 80) + (videoUrl?.length > 80 ? '...' : ''),
+    captionLength: caption?.length || 0
+  });
+
+  if (!agent || !agent.instanceId || !agent.token) {
+    throw new Error('Invalid agent configuration for video sending');
+  }
+
+  if (!to || typeof to !== 'string') {
+    throw new Error('Missing "to" parameter - phone number is required');
+  }
+
+  if (!videoUrl || typeof videoUrl !== 'string') {
+    throw new Error('Missing "videoUrl" parameter - video URL is required');
+  }
+
+  try {
+    const cleanPhone = to.replace(/\D/g, '');
+    console.log(`🎥 [ULTRAMSG-VIDEO] Sending to: ${cleanPhone} (original: ${to})`);
+
+    const requestData = {
+      token: agent.token,
+      to: cleanPhone,
+      video: videoUrl,
+      caption: caption || '',
+      priority: options.priority || 5,
+      referenceId: options.referenceId || `video_${Date.now()}`,
+      nocache: options.nocache || false
+    };
+
+    // Add optional msgId for replies
+    if (options.msgId) {
+      requestData.msgId = options.msgId;
+    }
+
+    // Add mentions for groups
+    if (options.mentions) {
+      requestData.mentions = options.mentions;
+    }
+
+    console.log(`📤 [ULTRAMSG-VIDEO] Request data prepared:`, {
+      to: requestData.to,
+      hasVideo: !!requestData.video,
+      captionLength: requestData.caption.length,
+      priority: requestData.priority,
+      referenceId: requestData.referenceId
+    });
+
+    const url = `${ULTRAMSG_BASE_URL}${agent.instanceId}/messages/video`;
+    console.log(`🔗 [ULTRAMSG-VIDEO] Sending to URL: ${url}`);
+
+    const response = await axios.post(url, requestData, {
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000 // 30 seconds timeout for video upload
+    });
+
+    console.log(`✅ [ULTRAMSG-VIDEO] Video sent successfully:`, {
+      responseId: response.data?.id,
+      status: response.data?.sent,
+      message: response.data?.message,
+      to: cleanPhone
+    });
+
+    // Return structure consistent with other UltraMsg methods
+    return {
+      data: response.data,
+      sent: response.data?.sent === 'true',
+      id: response.data?.id,
+      message: response.data?.message
+    };
+
+  } catch (error) {
+    console.error(`❌ [ULTRAMSG-VIDEO] Error sending video:`, {
+      error: error.message,
+      agentId: agent.id,
+      to: to,
+      videoUrl: videoUrl?.substring(0, 50),
+      isTimeout: error.code === 'ECONNABORTED',
+      statusCode: error.response?.status,
+      apiResponse: error.response?.data
+    });
+
+    // Enhanced error handling for video sending
+    if (error.response) {
+      const status = error.response.status;
+      const apiError = error.response.data;
+      
+      switch (status) {
+        case 400:
+          throw new Error(`UltraMsg API error: ${apiError?.error || 'Invalid video URL or format'}`);
+        case 401:
+          throw new Error('UltraMsg authentication failed - check agent token');
+        case 413:
+          throw new Error('Video file too large (max 16MB for UltraMsg)');
+        case 429:
+          throw new Error('UltraMsg rate limit exceeded - too many messages');
+        default:
+          throw new Error(`UltraMsg API error (${status}): ${apiError?.error || 'Unknown error'}`);
+      }
+    } else if (error.code === 'ECONNABORTED') {
+      throw new Error('Timeout sending video - UltraMsg took too long to respond');
+    } else {
+      throw new Error(`Network error sending video: ${error.message}`);
+    }
+  }
+}
+
 module.exports = { 
   sendUltraMsg, 
   sendUltraMsgWithRetry, 
   sendUltraMsgImage,
-  sendUltraMsgSmart 
+  sendUltraMsgSmart,
+  sendUltraMsgVideo 
 };
