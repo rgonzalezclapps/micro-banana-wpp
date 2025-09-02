@@ -108,10 +108,10 @@ class VertexVideoService {
           'Content-Type': 'application/json'
         };
         
-        // Add API key for external requests (local environment)
-        if (!this.IS_DOCKER_ENV && this.VIDEO_API_KEY) {
+        // Add API key for all requests (both internal and external)
+        if (this.VIDEO_API_KEY) {
           headers['X-API-Key'] = this.VIDEO_API_KEY;
-          console.log('🔐 Using API key for external video API request');
+          console.log(`🔐 Using API key for video API request (${this.IS_DOCKER_ENV ? 'Docker internal' : 'external'})`);
         }
         
         response = await axios.post(`${this.VIDEO_API_URL}/generate-video`, requestPayload, {
