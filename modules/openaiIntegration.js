@@ -3,6 +3,26 @@ const requestManager = require('./requestManager');
 const Conversation = require('../models/Conversation');
 const { Agent } = require('../models');
 const ultramsgService = require('../services/ultramsgService');
+const { sendWhatsAppBusinessMessage } = require('../services/whatsappBusinessService');
+
+// ============================================================================
+// Healthcare Function Imports - Restored healthcare tools
+// ============================================================================
+const {
+    handleMedicationIntake,
+    handleBloodPressureMeasurement,
+    handleAdverseEvent,
+    updatePreviousReport,
+    handleSearchPatient,
+    handleCodeVerification,
+    handleRegisterPatient,
+    handleRegisterAssistanceRequest,
+    handleSearchAppointments,
+    handleGetAppointments,
+    handleCreateAppointment,
+    handleCancelAppointment,
+    handlePatientInfoUpdate
+} = require('../tools/healthReportTools');
 
 class OpenAIIntegration {
     constructor() {
@@ -274,10 +294,10 @@ class OpenAIIntegration {
     }
 
     /**
-     * Send immediate message to user via UltraMsg before processing begins
+     * Send immediate message to user via appropriate service (UltraMsg or WhatsApp Business) before processing begins
      * @param {string} conversationId - MongoDB conversation ID
      * @param {string} messageText - Message text to send (supports basic markdown)
-     * @returns {Promise<Object>} Send result from UltraMsg
+     * @returns {Promise<Object>} Send result from messaging service
      */
     async sendImmediateMessageToUser(conversationId, messageText) {
         console.log(`📤 Sending immediate message to user in conversation: ${conversationId}`);
@@ -295,34 +315,73 @@ class OpenAIIntegration {
                 throw new Error(`Agent not found: ${conversation.agentId}`);
             }
             
-            // Validate UltraMsg credentials
-            if (!agent.instanceId || !agent.token) {
-                throw new Error(`Agent ${agent.id} missing UltraMsg credentials (instanceId: ${!!agent.instanceId}, token: ${!!agent.token})`);
-            }
-            
             // Validate phone number
             if (!conversation.phoneNumber || conversation.phoneNumber.trim().length === 0) {
                 throw new Error(`Invalid phone number for conversation ${conversationId}: ${conversation.phoneNumber}`);
             }
             
-            console.log(`📱 Sending via UltraMsg to ${conversation.phoneNumber} using agent ${agent.name} (ID: ${agent.id})`);
-            
-            // Send message via UltraMsg
-            const result = await ultramsgService.sendUltraMsg(
-                agent, 
-                conversation.phoneNumber, 
-                messageText.trim()
-            );
-            
-            if (result.sent !== 'true') {
-                throw new Error(`UltraMsg send failed: ${result.message || 'Unknown error'}`);
+            // Validate messaging credentials
+            if (!agent.instanceId || !agent.token) {
+                throw new Error(`Agent ${agent.id} missing messaging credentials (instanceId: ${!!agent.instanceId}, token: ${!!agent.token})`);
             }
             
-            console.log(`✅ Immediate message sent successfully to ${conversation.phoneNumber}:`, {
-                messageLength: messageText.length,
-                agentId: agent.id,
-                responseId: result.data?.id || 'N/A'
-            });
+            let result;
+            
+            // 🔄 Determine which service to use based on agent type
+            if (agent.type === 'wpp-bsp') {
+                // ✅ Use WhatsApp Business Service Provider (WhatsApp Factory API)
+                console.log(`📱 Sending via WhatsApp Factory API to ${conversation.phoneNumber} using agent ${agent.name} (ID: ${agent.id}, type: ${agent.type})`);
+                
+                try {
+                    result = await sendWhatsAppBusinessMessage(
+                        agent, 
+                        conversation.phoneNumber, 
+                        messageText.trim()
+                    );
+                    
+                    if (!result.success) {
+                        throw new Error(`WhatsApp Factory send failed: ${result.error || 'Unknown error'}`);
+                    }
+                    
+                    console.log(`✅ Immediate message sent successfully via WhatsApp Factory to ${conversation.phoneNumber}:`, {
+                        messageLength: messageText.length,
+                        agentId: agent.id,
+                        agentType: agent.type,
+                        messageId: result.messageId || result.data?.messageId || 'N/A'
+                    });
+                    
+                } catch (wspError) {
+                    console.error(`❌ WhatsApp Factory API error:`, wspError.message);
+                    throw new Error(`WhatsApp Factory API error: ${wspError.message}`);
+                }
+                
+            } else {
+                // ✅ Use UltraMsg (default/legacy behavior)  
+                console.log(`📱 Sending via UltraMsg to ${conversation.phoneNumber} using agent ${agent.name} (ID: ${agent.id}, type: ${agent.type || 'ultramsg'})`);
+                
+                try {
+                    result = await ultramsgService.sendUltraMsg(
+                        agent, 
+                        conversation.phoneNumber, 
+                        messageText.trim()
+                    );
+                    
+                    if (result.sent !== 'true') {
+                        throw new Error(`UltraMsg send failed: ${result.message || 'Unknown error'}`);
+                    }
+                    
+                    console.log(`✅ Immediate message sent successfully via UltraMsg to ${conversation.phoneNumber}:`, {
+                        messageLength: messageText.length,
+                        agentId: agent.id,
+                        agentType: agent.type || 'ultramsg',
+                        responseId: result.data?.id || 'N/A'
+                    });
+                    
+                } catch (ultraError) {
+                    console.error(`❌ UltraMsg API error:`, ultraError.message);
+                    throw new Error(`UltraMsg API error: ${ultraError.message}`);
+                }
+            }
             
             return result;
             
@@ -775,6 +834,335 @@ class OpenAIIntegration {
                         break;
 
                     // ============================================================================
+                    // Healthcare Management Tools - Restored from tools/healthReportTools.js
+                    // ============================================================================
+
+                    case "report_medication_intake":
+                        console.log(`💊 Reporting medication intake for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for medication intake: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with medication intake
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'medication_intake'
+                                });
+                            }
+                        }
+                        
+                        output = await handleMedicationIntake(parsedArgs, conversationId);
+                        console.log("output for handleMedicationIntake", output);
+                        break;
+
+                    case "report_blood_pressure_measurement":
+                        console.log(`🩺 Reporting blood pressure measurement for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for blood pressure: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with blood pressure
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'blood_pressure'
+                                });
+                            }
+                        }
+                        
+                        output = await handleBloodPressureMeasurement(parsedArgs, conversationId);
+                        console.log("output for handleBloodPressureMeasurement", output);
+                        break;
+
+                    case "report_adverse_event":
+                        console.log(`⚠️ Reporting adverse event for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for adverse event: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with adverse event
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'adverse_event'
+                                });
+                            }
+                        }
+                        
+                        output = await handleAdverseEvent(parsedArgs, conversationId);
+                        console.log("output for handleAdverseEvent", output);
+                        break;
+
+                    case "update_previous_report":
+                        console.log(`🔄 Updating previous report for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for report update: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with report update
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'update_report'
+                                });
+                            }
+                        }
+                        
+                        output = await updatePreviousReport(parsedArgs, conversationId);
+                        console.log("output for UpdatePreviousReport", output);
+                        break;
+
+                    case "search_patient":
+                        console.log(`🔍 Searching patient for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for patient search: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with patient search
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'patient_search'
+                                });
+                            }
+                        }
+                        
+                        output = await handleSearchPatient(parsedArgs, conversationId);
+                        console.log("output for handleSearchPatient", output);
+                        break;
+
+                    case "code_verification":
+                        console.log(`🔐 Handling code verification for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for code verification: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with code verification
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'code_verification'
+                                });
+                            }
+                        }
+                        
+                        output = await handleCodeVerification(parsedArgs, conversationId);
+                        console.log("output for handleCodeVerification", output);
+                        break;
+
+                    case "register_patient":
+                        console.log(`📝 Registering patient for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for patient registration: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with patient registration
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'register_patient'
+                                });
+                            }
+                        }
+                        
+                        output = await handleRegisterPatient(parsedArgs, conversationId);
+                        console.log("output for handleRegisterPatient", output);
+                        break;
+
+                    case "register_assistance_request":
+                        console.log(`🆘 Registering assistance request for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for assistance request: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with assistance request
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'assistance_request'
+                                });
+                            }
+                        }
+                        
+                        output = await handleRegisterAssistanceRequest(parsedArgs, conversationId);
+                        console.log("output for handleRegisterAssistanceRequest", output);
+                        break;
+
+                    case "search_appointments":
+                        console.log(`📅 Searching appointments for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for appointment search: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with appointment search
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'search_appointments'
+                                });
+                            }
+                        }
+                        
+                        output = await handleSearchAppointments(parsedArgs, conversationId);
+                        console.log("output for handleSearchAppointments", output);
+                        break;
+
+                    case "get_appointments":
+                        console.log(`📋 Getting appointments for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for get appointments: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with get appointments
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'get_appointments'
+                                });
+                            }
+                        }
+                        
+                        output = await handleGetAppointments(parsedArgs, conversationId);
+                        console.log("output for handleGetAppointments", output);
+                        break;
+
+                    case "create_appointment":
+                        console.log(`➕ Creating appointment for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for create appointment: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with create appointment
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'create_appointment'
+                                });
+                            }
+                        }
+                        
+                        output = await handleCreateAppointment(parsedArgs, conversationId);
+                        console.log("output for handleCreateAppointment", output);
+                        break;
+
+                    case "cancel_appointment":
+                        console.log(`❌ Cancelling appointment for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for cancel appointment: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with cancel appointment
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'cancel_appointment'
+                                });
+                            }
+                        }
+                        
+                        output = await handleCancelAppointment(parsedArgs, conversationId);
+                        console.log("output for handleCancelAppointment", output);
+                        break;
+
+                    case "patient_info_update":
+                        console.log(`📝 Updating patient info for conversation ${conversationId}`);
+                        
+                        // 🚀 NEW FEATURE: Send immediate message to user if provided
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for patient info update: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with patient info update
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    healthcareContext: 'patient_info_update'
+                                });
+                            }
+                        }
+                        
+                        output = await handlePatientInfoUpdate(parsedArgs, conversationId);
+                        console.log("output for handlePatientInfoUpdate", output);
+                        break;
+
+                    // ============================================================================
                     // Default case for unimplemented functions
                     // ============================================================================
                     
@@ -783,7 +1171,7 @@ class OpenAIIntegration {
                         output = { 
                             success: false,
                             status: "not_implemented", 
-                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest`,
+                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest, createTopupLink, checkCredits, videoGenerator, healthcare tools`,
                             function_name: name,
                             args: parsedArgs
                         };
