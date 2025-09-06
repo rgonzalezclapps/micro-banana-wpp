@@ -4,6 +4,8 @@ const Conversation = require('../models/Conversation');
 const { Agent } = require('../models');
 const ultramsgService = require('../services/ultramsgService');
 const { sendWhatsAppBusinessMessage } = require('../services/whatsappBusinessService');
+const { webGeneratorService } = require('../services/webGeneratorService');
+const { enqueueVideoJob } = require('../services/videoPollingWorker');
 
 // ============================================================================
 // Healthcare Function Imports - Restored healthcare tools
@@ -299,6 +301,92 @@ class OpenAIIntegration {
      * @param {string} messageText - Message text to send (supports basic markdown)
      * @returns {Promise<Object>} Send result from messaging service
      */
+    /**
+     * Detects aspect ratio from prompt text or explicit parameter
+     * @param {string} prompt - Video description prompt  
+     * @param {string} aspectRatio - Explicit aspect ratio parameter
+     * @returns {string} Detected aspect ratio ('16:9' or '9:16')
+     */
+    detectAspectRatio(prompt, aspectRatio) {
+        // Use explicit parameter if provided
+        if (aspectRatio === '9:16' || aspectRatio === '16:9') {
+            console.log(`🎯 Explicit aspect ratio provided: ${aspectRatio}`);
+            return aspectRatio;
+        }
+        
+        // Auto-detect from prompt text
+        const promptLower = prompt.toLowerCase();
+        const verticalKeywords = ['vertical', 'móvil', 'mobile', '9:16', 'portrait', 'celular', 'tiktok', 'stories'];
+        const horizontalKeywords = ['horizontal', 'widescreen', '16:9', 'landscape', 'pantalla', 'monitor'];
+        
+        const hasVertical = verticalKeywords.some(keyword => promptLower.includes(keyword));
+        const hasHorizontal = horizontalKeywords.some(keyword => promptLower.includes(keyword));
+        
+        if (hasVertical && !hasHorizontal) {
+            console.log(`🎯 Vertical format detected in prompt: ${aspectRatio || '9:16'}`);
+            return '9:16';
+        }
+        
+        // Default to 16:9 (horizontal)
+        console.log(`🎯 Using default horizontal format: 16:9`);
+        return '16:9';
+    }
+
+    /**
+     * Selects optimal model based on aspect ratio and user preference
+     * @param {string} aspectRatio - Detected or specified aspect ratio
+     * @param {number|string} userModel - User-specified model (optional)
+     * @returns {Object} Selected model configuration
+     */
+    selectOptimalModel(aspectRatio, userModel = null) {
+        // If user specified a model, respect it
+        if (userModel && (userModel === 2 || userModel === '2')) {
+            console.log(`👤 User specified Veo 2.0, respecting choice`);
+            return {
+                version: 2,
+                model: 'veo-2.0-generate-001'
+            };
+        }
+        
+        if (userModel && (userModel === 3 || userModel === '3')) {
+            // Check if Veo 3 can handle the requested aspect ratio
+            if (aspectRatio === '9:16') {
+                console.log(`⚠️ User specified Veo 3.0 but needs 9:16 - auto-switching to Veo 2.0`);
+                return {
+                    version: 2,
+                    model: 'veo-2.0-generate-001',
+                    autoSwitch: true,
+                    reason: 'Veo 3.0 does not support 9:16 aspect ratio'
+                };
+            }
+            console.log(`👤 User specified Veo 3.0, respecting choice`);
+            return {
+                version: 3,
+                model: 'veo-3.0-generate-preview'
+            };
+        }
+        
+        // No user model specified - intelligent selection
+        if (aspectRatio === '9:16') {
+            console.log(`🤖 Auto-selecting Veo 2.0 for vertical format (9:16)`);
+            return {
+                version: 2,
+                model: 'veo-2.0-generate-001',
+                autoSelected: true,
+                reason: 'Vertical format (9:16) requires Veo 2.0'
+            };
+        }
+        
+        // Default to Veo 3.0 for horizontal or unspecified
+        console.log(`🤖 Auto-selecting Veo 3.0 (default) for horizontal format (16:9)`);
+        return {
+            version: 3,
+            model: 'veo-3.0-generate-preview',
+            autoSelected: true,
+            reason: 'Default Veo 3.0 for best quality in 16:9 format'
+        };
+    }
+
     async sendImmediateMessageToUser(conversationId, messageText) {
         console.log(`📤 Sending immediate message to user in conversation: ${conversationId}`);
         
@@ -744,8 +832,8 @@ class OpenAIIntegration {
                         try {
                             const { vertexVideoService } = require('../services/vertexVideoService');
                             
-                            // Validate input parameters
-                            const { prompt, imageFileId } = parsedArgs;
+                            // Extract all parameters including new ones
+                            const { prompt, imageFileId, aspectRatio, negativePrompt, modelSelected, version } = parsedArgs;
                             
                             if (!prompt || typeof prompt !== 'string') {
                                 throw new Error('Missing required parameter: prompt is required and must be a string');
@@ -754,6 +842,20 @@ class OpenAIIntegration {
                             if (!imageFileId || typeof imageFileId !== 'string') {
                                 throw new Error('Missing required parameter: imageFileId is required for video generation');
                             }
+                            
+                            // 🎯 SMART MODEL SELECTION: Respect user model or auto-select with aspect ratio intelligence
+                            const detectedAspectRatio = this.detectAspectRatio(prompt, aspectRatio);
+                            const userSpecifiedModel = modelSelected || version; // Support both parameter names
+                            const modelConfig = this.selectOptimalModel(detectedAspectRatio, userSpecifiedModel);
+                            
+                            console.log('🤖 Enhanced video generation strategy:', {
+                                userRequestedModel: userSpecifiedModel || 'not specified',
+                                detectedAspectRatio: detectedAspectRatio,
+                                selectedModel: modelConfig.model,
+                                selectedVersion: modelConfig.version,
+                                autoSwitch: modelConfig.autoSwitch || false,
+                                reason: modelConfig.reason || 'User choice respected'
+                            });
                             
                             // Validate options with service
                             const validation = vertexVideoService.validateOptions({
@@ -765,47 +867,102 @@ class OpenAIIntegration {
                                 throw new Error(`Invalid video generation parameters: ${validation.errors.join(', ')}`);
                             }
                             
-                            console.log('🎯 Video generation request validated:', {
-                                prompt: prompt.substring(0, 100) + (prompt.length > 100 ? '...' : ''),
-                                hasImage: !!imageFileId,
-                                imageFileId: imageFileId || 'none'
-                            });
-                            
-                            // Generate video using Vertex AI (sync mode, Veo 3.0)
-                            const videoResult = await vertexVideoService.generateVideoWithRetry({
+                            // Build enhanced generation options
+                            const generationOptions = {
                                 prompt: prompt,
                                 imageFileId: imageFileId,
-                                mode: 'sync', // Always sync as requested
-                                model: 'veo-3.0-generate-preview' // Always Veo 3 as requested
+                                mode: 'async', // Always async as requested
+                                model: modelConfig.model,
+                                version: modelConfig.version,
+                                aspectRatio: detectedAspectRatio
+                            };
+                            
+                            // Add negative prompt if provided
+                            if (negativePrompt && negativePrompt.trim()) {
+                                generationOptions.negativePrompt = negativePrompt.trim();
+                                console.log(`🚫 Negative prompt added: "${negativePrompt.substring(0, 50)}${negativePrompt.length > 50 ? '...' : ''}"`);
+                            }
+                            
+                            console.log('🎯 Enhanced video generation request:', {
+                                prompt: prompt.substring(0, 100) + (prompt.length > 100 ? '...' : ''),
+                                aspectRatio: detectedAspectRatio,
+                                model: modelConfig.model,
+                                version: modelConfig.version,
+                                hasImage: !!imageFileId,
+                                hasNegativePrompt: !!negativePrompt,
+                                mode: 'async'
                             });
                             
+                            // Generate video using Vertex AI with enhanced options
+                            const videoResult = await vertexVideoService.generateVideoWithRetry(generationOptions);
+                            
                             if (videoResult.success) {
-                                console.log(`🎥 Video generated successfully:`, {
+                                console.log(`🎥 Enhanced video generated successfully:`, {
                                     executionTime: videoResult.executionTime,
                                     model: videoResult.model,
+                                    aspectRatio: detectedAspectRatio,
                                     hasVideoUrl: !!videoResult.videoUrl,
                                     hasDownloadUrl: !!videoResult.downloadUrl,
                                     imageUsed: videoResult.imageUsed,
+                                    negativePromptUsed: !!negativePrompt,
+                                    modelAutoSwitch: modelConfig.autoSwitch || false,
                                     retriesUsed: videoResult.retriesUsed || 0
                                 });
                                 
+                                // 🎬 ASYNC POLLING SETUP: If async mode and we have jobId, enqueue for background polling
+                                if (generationOptions.mode === 'async' && videoResult.jobId) {
+                                    try {
+                                        console.log(`🔄 [${videoResult.jobId}] Enqueueing video job for background polling`);
+                                        
+                                        const jobMetadata = {
+                                            prompt: prompt.substring(0, 100),
+                                            model: videoResult.model,
+                                            version: modelConfig.version,
+                                            aspectRatio: detectedAspectRatio,
+                                            hasNegativePrompt: !!negativePrompt
+                                        };
+                                        
+                                        await enqueueVideoJob(videoResult.jobId, conversationId, jobMetadata);
+                                        console.log(`✅ [${videoResult.jobId}] Video job enqueued for polling - user will receive video when ready`);
+                                        
+                                    } catch (enqueueError) {
+                                        // Non-blocking: Log error but don't fail the tool response
+                                        console.error(`⚠️ Failed to enqueue video job (non-blocking):`, {
+                                            jobId: videoResult.jobId,
+                                            conversationId,
+                                            error: enqueueError.message
+                                        });
+                                    }
+                                }
+                                
+                                // Build response object
                                 output = {
                                     success: true,
-                                    message: `Video generado exitosamente usando ${videoResult.model}`,
+                                    message: `Video generado exitosamente usando ${videoResult.model} (${detectedAspectRatio})${modelConfig.autoSwitch ? ' - modelo auto-ajustado para compatibilidad' : ''}`,
                                     video_url: videoResult.videoUrl,
                                     download_url: videoResult.downloadUrl,
+                                    job_id: videoResult.jobId,
+                                    status_url: videoResult.statusUrl,
                                     execution_time: videoResult.executionTime,
                                     model_used: videoResult.model,
+                                    version_used: modelConfig.version,
+                                    aspect_ratio: detectedAspectRatio,
                                     prompt_used: prompt,
+                                    negative_prompt_used: negativePrompt || null,
                                     image_used: !!imageFileId,
-                                    processing_mode: 'sync',
-                                    retries_used: videoResult.retriesUsed || 0
+                                    processing_mode: 'async',
+                                    model_selection_reason: modelConfig.reason,
+                                    auto_switch_applied: modelConfig.autoSwitch || false,
+                                    retries_used: videoResult.retriesUsed || 0,
+                                    polling_status: videoResult.jobId ? 'Job enqueued for background polling - you will receive the video when ready' : 'No job tracking available'
                                 };
                             } else {
                                 // Service returned error response
-                                console.error('❌ Video generation failed:', {
+                                console.error('❌ Enhanced video generation failed:', {
                                     error: videoResult.error,
                                     errorCode: videoResult.errorCode,
+                                    model: modelConfig.model,
+                                    aspectRatio: detectedAspectRatio,
                                     prompt: prompt.substring(0, 100)
                                 });
                                 
@@ -814,6 +971,9 @@ class OpenAIIntegration {
                                     error: videoResult.error || 'Error generating video',
                                     error_code: videoResult.errorCode || 'GENERATION_FAILED',
                                     message: 'No se pudo generar el video. Intenta con un prompt más simple o una imagen diferente.',
+                                    model_attempted: modelConfig.model,
+                                    aspect_ratio_attempted: detectedAspectRatio,
+                                    version_attempted: modelConfig.version,
                                     prompt_used: prompt,
                                     image_used: !!imageFileId
                                 };
@@ -829,6 +989,103 @@ class OpenAIIntegration {
                                 message: 'Hubo un error generando tu video. Por favor intenta nuevamente con un prompt diferente.',
                                 prompt_used: parsedArgs.prompt || 'unknown',
                                 image_used: !!parsedArgs.imageFileId
+                            };
+                        }
+                        break;
+
+                    // ============================================================================
+                    // Website Generation - Long-Duration Job with Redis Queue
+                    // ============================================================================
+
+                    case "generateWebsite":
+                        console.log(`🌐 Generating website for conversation ${conversationId}`);
+                        
+                        // 🚀 IMMEDIATE MESSAGING: Send immediate message to user about processing time
+                        if (parsedArgs.messageToUser && parsedArgs.messageToUser.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for website generation: "${parsedArgs.messageToUser.substring(0, 100)}${parsedArgs.messageToUser.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.messageToUser.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with website generation
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    websiteContext: 'generateWebsite'
+                                });
+                            }
+                        }
+                        
+                        try {
+                            // Validate input parameters
+                            const { prompt } = parsedArgs;
+                            
+                            if (!prompt || typeof prompt !== 'string') {
+                                throw new Error('Missing required parameter: prompt is required and must be a string');
+                            }
+                            
+                            if (prompt.trim().length < 10) {
+                                throw new Error('Prompt too short: Please provide a more detailed website description (minimum 10 characters)');
+                            }
+                            
+                            console.log('🚀 Website generation request validated:', {
+                                prompt: prompt.substring(0, 100) + (prompt.length > 100 ? '...' : ''),
+                                conversationId,
+                                promptLength: prompt.length
+                            });
+                            
+                            // Initiate website generation with Redis queue processing
+                            const generationResult = await webGeneratorService.initiateGeneration(
+                                prompt.trim(),
+                                conversationId
+                            );
+                            
+                            if (generationResult.success) {
+                                console.log(`🎯 Website generation initiated successfully:`, {
+                                    trackingUrl: generationResult.trackingUrl,
+                                    projectId: generationResult.projectId,
+                                    requestId: generationResult.requestId,
+                                    estimatedTime: generationResult.estimatedTime
+                                });
+                                
+                                output = {
+                                    success: true,
+                                    message: generationResult.message,
+                                    tracking_url: generationResult.trackingUrl,
+                                    project_id: generationResult.projectId,
+                                    request_id: generationResult.requestId,
+                                    status_url: generationResult.statusUrl,
+                                    estimated_time: generationResult.estimatedTime,
+                                    prompt_used: prompt,
+                                    processing_note: 'Background polling initiated - user will receive notification when completed'
+                                };
+                            } else {
+                                // Service returned error response
+                                console.error('❌ Website generation initiation failed:', {
+                                    error: generationResult.error,
+                                    message: generationResult.message,
+                                    prompt: prompt.substring(0, 100)
+                                });
+                                
+                                output = {
+                                    success: false,
+                                    error: generationResult.error || 'Error initiating website generation',
+                                    message: generationResult.message || 'No se pudo iniciar la generación del sitio web. Por favor intenta nuevamente.',
+                                    prompt_used: prompt
+                                };
+                            }
+                            
+                        } catch (error) {
+                            console.error('❌ Error in generateWebsite tool:', error);
+                            
+                            output = {
+                                success: false,
+                                error: error.message || 'Error generating website',
+                                error_code: 'TOOL_ERROR',
+                                message: 'Hubo un error generando tu sitio web. Por favor intenta nuevamente con una descripción diferente.',
+                                prompt_used: parsedArgs.prompt || 'unknown'
                             };
                         }
                         break;
@@ -1171,7 +1428,7 @@ class OpenAIIntegration {
                         output = { 
                             success: false,
                             status: "not_implemented", 
-                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest, createTopupLink, checkCredits, videoGenerator, healthcare tools`,
+                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest, createTopupLink, checkCredits, videoGenerator, generateWebsite, healthcare tools`,
                             function_name: name,
                             args: parsedArgs
                         };

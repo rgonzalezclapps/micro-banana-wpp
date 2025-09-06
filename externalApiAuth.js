@@ -8,7 +8,7 @@
  * Node.js Context: Middleware - API key authentication and rate limiting for external endpoints
  * 
  * Dependencies:
- * - process.env.API_KEY_ADAM (environment variable for API key)
+ * - process.env.API_KEY_WEBHOOK (environment variable for API key)
  * 
  * Dependants:
  * - routes/externalApiRoutes.js (uses this middleware for authentication)
@@ -49,9 +49,9 @@ const validateExternalApiKey = (req, res, next) => {
         }
         
         // Validate API key value
-        const validApiKey = process.env.API_KEY_ADAM;
+        const validApiKey = process.env.API_KEY_WEBHOOK;
         if (!validApiKey) {
-            console.error('API_KEY_ADAM environment variable not configured');
+            console.error('API_KEY_WEBHOOK environment variable not configured');
             return res.status(500).json({
                 success: false,
                 error: 'SERVER_CONFIGURATION_ERROR',

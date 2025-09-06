@@ -24,6 +24,12 @@ const Conversation = require("./models/Conversation"); // Still needed for datab
 // Removed cron dependency - no scheduled tasks needed
 // Removed mailing service - pure API chatbot
 
+// Website generation worker for long-duration Redis queue processing
+const { websiteGeneratorWorker } = require("./services/webGeneratorWorker");
+
+// Video polling worker for short-duration video job processing
+const { videoPollingWorker } = require("./services/videoPollingWorker");
+
 const PORT = process.env.PORT || 5001;
 
 // Removed Botmaker cron functionality
@@ -92,10 +98,25 @@ const startServer = async () => {
       process.exit(1);
     }
     
-    await sequelize.sync({ alter: true });
+    // Temporarily force recreation of website_generations table to fix ENUM syntax issues
+    await sequelize.sync({ force: false, alter: false });
     console.log("✅ Database schema synchronized");
 
     // No admin user needed for pure API chatbot
+
+    // Start website generation worker for long-duration Redis queue processing
+    console.log("🔄 Starting website generation worker...");
+    websiteGeneratorWorker.start().catch(error => {
+      console.error("❌ Website generation worker failed to start:", error.message);
+      // Non-blocking: Server can still run without worker
+    });
+
+    // Start video polling worker for short-duration video job processing  
+    console.log("🎬 Starting video polling worker...");
+    videoPollingWorker.start().catch(error => {
+      console.error("❌ Video polling worker failed to start:", error.message);
+      // Non-blocking: Server can still run without video worker
+    });
 
     // Start the pure API server
     app.listen(PORT, () => {
@@ -113,6 +134,25 @@ const startServer = async () => {
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
   // Application specific logging, throwing an error, or other logic here
+});
+
+// Graceful shutdown handling for both workers
+process.on('SIGINT', async () => {
+  console.log('🛑 SIGINT received, shutting down gracefully...');
+  await Promise.all([
+    websiteGeneratorWorker.stop(),
+    videoPollingWorker.stop()
+  ]);
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  await Promise.all([
+    websiteGeneratorWorker.stop(),
+    videoPollingWorker.stop()
+  ]);
+  process.exit(0);
 });
 
 startServer();

@@ -25,6 +25,8 @@ db.Participant = require('./Participant')(sequelize, Sequelize.DataTypes);
 db.ParticipantAgentAssociation = require('./ParticipantAgentAssociation')(sequelize, Sequelize.DataTypes);
 db.Payment = require('./Payment')(sequelize, Sequelize.DataTypes);
 
+// Website generation system - handled by automatic loop above
+
 Object.keys(db).forEach(modelName => {
   if (db[modelName].associate) {
     db[modelName].associate(db);

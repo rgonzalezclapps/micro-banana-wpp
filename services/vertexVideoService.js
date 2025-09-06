@@ -39,15 +39,33 @@ class VertexVideoService {
     this.VIDEO_API_KEY = process.env.VIDEO_API_KEY || process.env.API_KEY_WEBHOOK;
     this.FILE_STORAGE_EXTERNAL_URL = process.env.FILE_STORAGE_EXTERNAL_URL || 'https://files.api-ai-mvp.com';
     
-    // Default configuration
-    this.DEFAULT_MODEL = 'veo-3.0-generate-preview'; // As requested - always Veo 3
-    this.DEFAULT_MODE = 'sync'; // As requested - always sync
+    // Default configuration - flexible model support
+    this.DEFAULT_MODEL = 'veo-3.0-generate-preview'; // Default fallback when no model specified
+    this.DEFAULT_MODE = 'async'; // Default to async for better resource management
     this.TIMEOUT_SYNC = 120000; // 2 minutes timeout for sync requests
     this.MAX_RETRIES = 2;
   }
 
   /**
-   * Generate video using Vertex AI Veo 3.0 (Image-to-Video only)
+   * Extracts version number from model name for API compatibility
+   * @param {string} model - Model name (e.g., 'veo-2.0-generate-001' or 'veo-3.0-generate-preview')
+   * @returns {number} Version number (2 or 3)
+   */
+  getVersionFromModel(model) {
+    if (typeof model === 'string') {
+      if (model.includes('veo-2.0') || model.includes('2.0')) {
+        return 2;
+      }
+      if (model.includes('veo-3.0') || model.includes('3.0')) {
+        return 3;
+      }
+    }
+    // Default to version 3 if cannot determine
+    return 3;
+  }
+
+  /**
+   * Generate video using Vertex AI with flexible model support (Veo 2.0 & 3.0)
    * @param {Object} options Video generation options
    * @param {string} options.prompt Video description and instructions
    * @param {string} options.imageFileId Required image file ID from storage (32-char hex)
@@ -76,16 +94,27 @@ class VertexVideoService {
         imageUrl: imageUrl
       });
 
-      // Prepare request payload
+      // Prepare request payload with intelligent version selection
       const requestPayload = {
         prompt: options.prompt,
         mode: options.mode || this.DEFAULT_MODE,
         model: options.model || this.DEFAULT_MODEL,
-        version: 3  // Required by video API - always use Veo 3 as requested
+        version: options.version || this.getVersionFromModel(options.model || this.DEFAULT_MODEL)
       };
 
       // Add imageUrl (REQUIRED for this tool)
       requestPayload.imageUrl = imageUrl;
+      
+      // Add optional parameters if provided
+      if (options.aspectRatio) {
+        requestPayload.aspectRatio = options.aspectRatio;
+        console.log(`📐 Aspect ratio specified: ${options.aspectRatio}`);
+      }
+      
+      if (options.negativePrompt && options.negativePrompt.trim()) {
+        requestPayload.negativePrompt = options.negativePrompt.trim();
+        console.log(`🚫 Negative prompt specified: "${options.negativePrompt.substring(0, 50)}${options.negativePrompt.length > 50 ? '...' : ''}"`);
+      }
 
       console.log('📤 Sending video generation request to Vertex AI:', {
         endpoint: this.VIDEO_API_URL,
@@ -160,33 +189,68 @@ class VertexVideoService {
 
       const result = response.data;
       
-      // Check for API error response (new structure)
-      if (result.error || (result.status && result.status !== 'completed')) {
+      // Check for API error response - async mode fix
+      if (result.error) {
         throw new Error(`Video generation failed: ${result.error || result.message || 'Unknown error'}`);
       }
+      
+      // For async mode, "processing" and "queued" are SUCCESS states, not errors
+      // Only treat "failed" as an error state
+      if (result.status && result.status === 'failed') {
+        throw new Error(`Video generation failed: ${result.message || 'Generation failed with no details'}`);
+      }
 
-      console.log('✅ Video generation completed successfully:', {
+      // Enhanced success logging for async vs sync modes
+      const isAsyncMode = requestPayload.mode === 'async' || result.status === 'processing';
+      console.log(`✅ Video generation ${isAsyncMode ? 'initiated' : 'completed'} successfully:`, {
         executionTime: result.details?.processingTime || `${(processingTime / 1000).toFixed(1)}s`,
         model: result.details?.model || requestPayload.model,
+        version: requestPayload.version,
+        status: result.status,
+        mode: requestPayload.mode,
         hasVideoUrl: !!result.videoUrl,
+        hasJobId: !!result.jobId,
         hasFileId: !!result.fileId,
-        status: result.status
+        aspectRatio: requestPayload.aspectRatio || 'default',
+        processingState: isAsyncMode ? 'Job queued - will complete in 1-2 minutes' : 'Video ready immediately'
       });
 
-      return {
+      // Enhanced return object for async vs sync modes
+      const responseData = {
         success: true,
-        videoUrl: result.videoUrl,
-        downloadUrl: result.videoUrl, // videoUrl already includes the key
-        fileId: result.fileId,
         model: result.details?.model || requestPayload.model,
+        version: requestPayload.version,
         executionTime: result.details?.processingTime || `${(processingTime / 1000).toFixed(1)}s`,
         prompt: options.prompt,
         imageUsed: !!options.imageFileId,
         processingMode: requestPayload.mode,
-        jobId: result.jobId,
-        aspectRatio: result.details?.aspectRatio,
-        duration: result.details?.duration
+        status: result.status,
+        aspectRatio: requestPayload.aspectRatio || result.details?.aspectRatio || 'default',
+        duration: result.details?.duration || 5
       };
+      
+      // Add async-specific properties (job tracking)
+      if (result.jobId) {
+        responseData.jobId = result.jobId;
+        responseData.statusUrl = result.statusUrl || `/job/${result.jobId}`;
+      }
+      
+      // Add sync/completed properties (final video)
+      if (result.videoUrl) {
+        responseData.videoUrl = result.videoUrl;
+        responseData.downloadUrl = result.videoUrl; // videoUrl already includes the key
+      }
+      
+      if (result.fileId) {
+        responseData.fileId = result.fileId;
+      }
+      
+      // Add negative prompt info if used
+      if (options.negativePrompt) {
+        responseData.negativePromptUsed = options.negativePrompt;
+      }
+      
+      return responseData;
 
     } catch (error) {
       console.error('❌ Vertex AI video generation error:', {
@@ -351,8 +415,8 @@ class VertexVideoService {
       errors.push('Prompt is required and must be a string');
     } else if (options.prompt.length < 10) {
       errors.push('Prompt must be at least 10 characters long');
-    } else if (options.prompt.length > 500) {
-      errors.push('Prompt must be 500 characters or less');
+    } else if (options.prompt.length > 1255) {
+      errors.push('Prompt must be 1255 characters or less');
     }
     
     if (!options.imageFileId || typeof options.imageFileId !== 'string') {
