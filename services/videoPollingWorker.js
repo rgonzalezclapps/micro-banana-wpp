@@ -627,8 +627,16 @@ class VideoPollingWorker {
                 caption
             );
             
+            console.log(`🔍 [VIDEO-WORKER] UltraMsg response validation:`, {
+                sentField: result.sent,
+                sentType: typeof result.sent,
+                messageField: result.message,
+                hasId: !!result.id,
+                rawData: result.data
+            });
+            
             if (result.sent !== 'true') {
-                throw new Error(`UltraMsg video send failed: ${result.message}`);
+                throw new Error(`UltraMsg video send failed: ${result.message || 'Unknown error'}`);
             }
             
             console.log(`✅ UltraMsg video sent successfully`);

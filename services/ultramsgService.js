@@ -283,15 +283,25 @@ async function sendUltraMsgVideo(agent, to, videoUrl, caption = '', options = {}
 
     console.log(`✅ [ULTRAMSG-VIDEO] Video sent successfully:`, {
       responseId: response.data?.id,
-      status: response.data?.sent,
+      status: response.data?.status, // Video API uses "status" not "sent"
       message: response.data?.message,
       to: cleanPhone
     });
 
     // Return structure consistent with other UltraMsg methods
+    // FIXED: Video API returns "status" field, not "sent" field - robust validation
+    const isSuccess = response.data?.status === 'true' || response.data?.status === true;
+    
+    console.log(`🔍 [ULTRAMSG-VIDEO] Response validation:`, {
+      statusField: response.data?.status,
+      statusType: typeof response.data?.status,
+      isSuccess: isSuccess,
+      willReturnSent: isSuccess ? 'true' : 'false'
+    });
+    
     return {
       data: response.data,
-      sent: response.data?.sent === 'true',
+      sent: isSuccess ? 'true' : 'false', // Robust mapping for both string and boolean
       id: response.data?.id,
       message: response.data?.message
     };
