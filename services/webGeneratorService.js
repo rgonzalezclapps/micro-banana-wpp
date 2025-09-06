@@ -107,17 +107,18 @@ class WebGeneratorService {
             });
             
             // Step 2: Set up Redis state tracking for long-duration job
-            await this.setupRedisState(requestId, apiResponse, conversationId);
+            await this.setupRedisState(requestId, apiResponse, conversationId, 'generate');
             
             // Step 3: Enqueue polling job for background processing
             await this.enqueuePollJob(requestId);
             
-            // Step 4: Return immediate response with tracking URL
+            // Step 4: Return immediate response with tracking URL and seed
             const trackingUrl = `${this.baseURL}/${apiResponse.projectId}`;
             
             console.log(`✅ [${requestId}] Generation setup complete:`, {
                 trackingUrl,
                 projectId: apiResponse.projectId,
+                seed: apiResponse.seedUsed,
                 conversationId
             });
             
@@ -125,6 +126,7 @@ class WebGeneratorService {
                 success: true,
                 requestId: apiResponse.requestId || requestId,
                 projectId: apiResponse.projectId,
+                seed: apiResponse.seedUsed, // Include seed for future updates
                 trackingUrl: trackingUrl,
                 statusUrl: apiResponse.statusUrl,
                 message: `Tu solicitud está siendo procesada. Puedes ver el progreso en: ${trackingUrl}`,
@@ -146,11 +148,23 @@ class WebGeneratorService {
     }
 
     /**
+     * Generates a random seed for website generation reproducibility
+     * @returns {string} Random seed string for consistent generation
+     */
+    generateWebsiteSeed() {
+        // Generate cryptographically secure random seed (32 chars)
+        const seed = require('crypto').randomBytes(16).toString('hex');
+        console.log(`🌱 Generated website seed: ${seed}`);
+        return seed;
+    }
+
+    /**
      * Calls the external webs.clapps.io API to initiate website generation
      * @param {string} prompt - Website description
-     * @returns {Promise<Object>} API response with project details
+     * @param {string} seed - Optional seed for reproducibility (auto-generated if not provided)
+     * @returns {Promise<Object>} API response with project details and seed used
      */
-    async callGenerationAPI(prompt) {
+    async callGenerationAPI(prompt, seed = null) {
         if (!this.apiKey) {
             throw new Error('WEB_GENERATOR_API_KEY not configured');
         }
@@ -158,15 +172,25 @@ class WebGeneratorService {
         const endpoint = `${this.baseURL}/api/generate-site`;
         const params = { key: this.apiKey };
         
+        // Generate seed if not provided (for new sites)
+        const websiteSeed = seed || this.generateWebsiteSeed();
+        
+        const requestBody = { 
+            prompt,
+            seed: websiteSeed  // Add seed for reproducible generation
+        };
+        
         console.log(`📡 Calling website generation API:`, {
             endpoint,
             promptLength: prompt.length,
+            hasSeed: !!websiteSeed,
+            seed: websiteSeed,
             hasKey: !!this.apiKey
         });
         
         try {
             const response = await axios.post(endpoint, 
-                { prompt }, 
+                requestBody, 
                 { 
                     params,
                     timeout: 30000, // 30s timeout for API call
@@ -177,6 +201,9 @@ class WebGeneratorService {
             if (!response.data.projectId) {
                 throw new Error('Invalid API response: missing projectId');
             }
+            
+            // Include seed in response for future updates
+            response.data.seedUsed = websiteSeed;
             
             return response.data;
             
@@ -198,33 +225,189 @@ class WebGeneratorService {
     }
 
     /**
+     * Calls the external webs.clapps.io API to update an existing website
+     * @param {string} projectId - Existing project ID (e.g., site-abc123)
+     * @param {string} updatePrompt - Update instructions
+     * @param {string} seed - Original seed from initial generation
+     * @param {number} template - Optional new template ID (1-5)
+     * @returns {Promise<Object>} API response with update details
+     */
+    async callUpdateAPI(projectId, updatePrompt, seed, template = null) {
+        if (!this.apiKey) {
+            throw new Error('WEB_GENERATOR_API_KEY not configured');
+        }
+        
+        const endpoint = `${this.baseURL}/api/update-site`;
+        const params = { key: this.apiKey };
+        
+        const requestBody = {
+            projectId,
+            prompt: updatePrompt,
+            seed // Use original seed for consistent updates
+        };
+        
+        // Add template parameter - always include since it's required in tool definition
+        // Template is required in tool but we want to preserve original if not changing
+        if (template && Number.isInteger(template) && template >= 1 && template <= 5) {
+            requestBody.template = template;
+            console.log(`🎨 Template change requested: ${template}`);
+        } else {
+            // Template is required in tool definition but we want to keep original
+            console.log(`🎨 No template change - will preserve original template`);
+        }
+        
+        console.log(`🔄 Calling website update API:`, {
+            endpoint,
+            projectId,
+            updatePromptLength: updatePrompt.length,
+            seed,
+            template: template || 'unchanged',
+            hasKey: !!this.apiKey
+        });
+        
+        try {
+            const response = await axios.post(endpoint, 
+                requestBody, 
+                { 
+                    params,
+                    timeout: 30000, // 30s timeout for API call
+                    headers: { 'Content-Type': 'application/json' }
+                }
+            );
+            
+            if (!response.data.projectId) {
+                throw new Error('Invalid update API response: missing projectId');
+            }
+            
+            // Ensure update response includes all necessary data
+            response.data.updateType = true; // Mark as update for worker
+            response.data.originalProjectId = projectId;
+            response.data.seedUsed = seed;
+            
+            return response.data;
+            
+        } catch (error) {
+            console.error('❌ Website update API error:', {
+                error: error.message,
+                projectId,
+                response: error.response?.data,
+                status: error.response?.status
+            });
+            
+            if (error.response?.status === 401) {
+                throw new Error('Invalid API key for website update service');
+            } else if (error.response?.status === 404) {
+                throw new Error('Original website not found - check projectId');
+            } else if (error.response?.status === 429) {
+                throw new Error('Rate limit exceeded. Please try again later');
+            } else {
+                throw new Error(`Website update API error: ${error.response?.data?.message || error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Initiates website update and sets up Redis state tracking for long-duration processing
+     * @param {string} projectId - Existing project ID
+     * @param {string} updatePrompt - Update instructions
+     * @param {string} seed - Original seed from initial generation
+     * @param {string} conversationId - MongoDB conversation ID for notifications
+     * @param {number} template - Optional new template ID
+     * @returns {Promise<Object>} Update result with tracking URL and job setup
+     */
+    async initiateUpdate(projectId, updatePrompt, seed, conversationId, template = null) {
+        const requestId = `upd_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        console.log(`🔄 [${requestId}] Initiating website update for project: ${projectId}, conversation: ${conversationId}`);
+        
+        try {
+            // Step 1: Call external API to start update
+            const apiResponse = await this.callUpdateAPI(projectId, updatePrompt, seed, template);
+            console.log(`📡 [${requestId}] Update API response received:`, {
+                status: apiResponse.status,
+                projectId: apiResponse.projectId,
+                newRequestId: apiResponse.requestId,
+                hasUrl: !!apiResponse.url
+            });
+            
+            // Step 2: Set up Redis state tracking for update job
+            await this.setupRedisState(requestId, apiResponse, conversationId, 'update');
+            
+            // Step 3: Enqueue polling job for background processing  
+            await this.enqueuePollJob(requestId);
+            
+            // Step 4: Return immediate response with same URL (projectId unchanged)
+            const trackingUrl = `${this.baseURL}/${apiResponse.projectId}`;
+            
+            console.log(`✅ [${requestId}] Update setup complete:`, {
+                trackingUrl,
+                projectId: apiResponse.projectId,
+                originalProjectId: projectId,
+                updateRequestId: apiResponse.requestId,
+                conversationId
+            });
+            
+            return {
+                success: true,
+                requestId: apiResponse.requestId || requestId,
+                projectId: apiResponse.projectId,
+                originalProjectId: projectId,
+                updateType: true,
+                trackingUrl: trackingUrl,
+                statusUrl: apiResponse.statusUrl,
+                message: `Tu sitio web se está actualizando. Puedes ver el progreso en: ${trackingUrl}`,
+                estimatedTime: '5-15 minutos',
+                templateChanged: !!template
+            };
+            
+        } catch (error) {
+            console.error(`❌ [${requestId}] Website update initiation failed:`, error.message);
+            
+            // Clean up any partial Redis state
+            await this.cleanupJobState(requestId).catch(() => {});
+            
+            return {
+                success: false,
+                error: error.message,
+                projectId: projectId,
+                message: 'Error al iniciar la actualización del sitio web. Por favor intenta nuevamente.'
+            };
+        }
+    }
+
+    /**
      * Sets up Redis state for long-duration job tracking
      * @param {string} requestId - Internal request ID
-     * @param {Object} apiResponse - Response from generation API
+     * @param {Object} apiResponse - Response from generation/update API
      * @param {string} conversationId - Conversation ID for notifications
+     * @param {string} jobType - Job type ('generate' or 'update')
      */
-    async setupRedisState(requestId, apiResponse, conversationId) {
+    async setupRedisState(requestId, apiResponse, conversationId, jobType = 'generate') {
         try {
             if (!redisClient.isOpen) {
                 await redisClient.connect();
             }
             
-            const generationState = {
+            const jobState = {
                 projectId: apiResponse.projectId,
                 externalRequestId: apiResponse.requestId,
                 conversationId: conversationId,
-                status: 'generating',
+                status: jobType === 'update' ? 'updating' : 'generating',
+                jobType: jobType, // 'generate' or 'update'
                 startTime: Date.now(),
                 url: `${this.baseURL}/${apiResponse.projectId}`,
                 statusUrl: apiResponse.statusUrl,
-                templateStyle: apiResponse.templateStyle
+                templateStyle: apiResponse.templateStyle,
+                // Update-specific fields
+                originalProjectId: apiResponse.originalProjectId || apiResponse.projectId,
+                updateType: apiResponse.updateType || false,
+                seedUsed: apiResponse.seedUsed
             };
             
             // Store generation state with 25min TTL
             await redisClient.setEx(
                 REDIS_KEYS.generating(requestId),
                 TTL.generating,
-                JSON.stringify(generationState)
+                JSON.stringify(jobState)
             );
             
             // Initialize attempt counter
@@ -234,10 +417,12 @@ class WebGeneratorService {
                 '0'
             );
             
-            console.log(`📝 [${requestId}] Redis state initialized:`, {
+            console.log(`📝 [${requestId}] Redis state initialized for ${jobType}:`, {
                 projectId: apiResponse.projectId,
+                jobType: jobType,
                 conversationId,
-                ttl: TTL.generating
+                ttl: TTL.generating,
+                seedUsed: apiResponse.seedUsed
             });
             
         } catch (redisError) {

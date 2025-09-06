@@ -1057,6 +1057,7 @@ class OpenAIIntegration {
                                     project_id: generationResult.projectId,
                                     request_id: generationResult.requestId,
                                     status_url: generationResult.statusUrl,
+                                    seed: generationResult.seed, // Include seed for future updates
                                     estimated_time: generationResult.estimatedTime,
                                     prompt_used: prompt,
                                     processing_note: 'Background polling initiated - user will receive notification when completed'
@@ -1086,6 +1087,150 @@ class OpenAIIntegration {
                                 error_code: 'TOOL_ERROR',
                                 message: 'Hubo un error generando tu sitio web. Por favor intenta nuevamente con una descripción diferente.',
                                 prompt_used: parsedArgs.prompt || 'unknown'
+                            };
+                        }
+                        break;
+
+                    // ============================================================================
+                    // Website Update - Existing Site Modification with Seed Consistency
+                    // ============================================================================
+
+                    case "updateWebsite":
+                        console.log(`🔄 Updating existing website for conversation ${conversationId}`);
+                        
+                        // 🚀 IMMEDIATE MESSAGING: Send immediate message about update processing time
+                        if (parsedArgs.message_to_user && parsedArgs.message_to_user.trim()) {
+                            try {
+                                console.log(`📤 Sending immediate message for website update: "${parsedArgs.message_to_user.substring(0, 100)}${parsedArgs.message_to_user.length > 100 ? '...' : ''}"`);
+                                await this.sendImmediateMessageToUser(
+                                    conversationId, 
+                                    parsedArgs.message_to_user.trim()
+                                );
+                            } catch (messageError) {
+                                // Non-blocking: Log error but continue with website update
+                                console.error(`⚠️ Failed to send immediate message (non-blocking):`, {
+                                    error: messageError.message,
+                                    conversationId,
+                                    websiteContext: 'updateWebsite'
+                                });
+                            }
+                        }
+                        
+                        try {
+                            // Validate input parameters - aligned with tool definition
+                            const { project_id, update_prompt, seed, template, message_to_user } = parsedArgs;
+                            
+                            if (!project_id || typeof project_id !== 'string') {
+                                throw new Error('Missing required parameter: project_id is required and must be a string');
+                            }
+                            
+                            if (!update_prompt || typeof update_prompt !== 'string') {
+                                throw new Error('Missing required parameter: update_prompt is required and must be a string');
+                            }
+                            
+                            if (!seed || typeof seed !== 'string') {
+                                throw new Error('Missing required parameter: seed is required for consistent updates');
+                            }
+                            
+                            if (!template || !Number.isInteger(template)) {
+                                throw new Error('Missing required parameter: template is required and must be an integer (1-5)');
+                            }
+                            
+                            if (update_prompt.trim().length < 10) {
+                                throw new Error('Update prompt too short: Please provide more detailed update instructions (minimum 10 characters)');
+                            }
+                            
+                            if (update_prompt.length > 5000) {
+                                throw new Error('Update prompt too long: Maximum 5000 characters allowed');
+                            }
+                            
+                            // Validate project_id format  
+                            if (!project_id.match(/^site-[a-z0-9]{8}$/)) {
+                                throw new Error('Invalid project_id format: Must be format site-xxxxxxxx');
+                            }
+                            
+                            // Validate seed format (32-char hex)
+                            if (!seed.match(/^[a-f0-9]{32}$/)) {
+                                throw new Error('Invalid seed format: Must be 32 character hexadecimal string');
+                            }
+                            
+                            // Validate template range
+                            if (template < 1 || template > 5) {
+                                throw new Error('Invalid template: Must be between 1 and 5 (1=TechFlow, 2=MinimalZen, 3=NeonVibe, 4=CorporatePro, 5=CreativeStudio)');
+                            }
+                            
+                            console.log('🔄 Website update request validated:', {
+                                projectId: project_id,
+                                updatePrompt: update_prompt.substring(0, 100) + (update_prompt.length > 100 ? '...' : ''),
+                                seed: seed,
+                                template: template,
+                                conversationId,
+                                updatePromptLength: update_prompt.length
+                            });
+                            
+                            // Initiate website update with Redis queue processing
+                            const updateResult = await webGeneratorService.initiateUpdate(
+                                project_id,
+                                update_prompt.trim(),
+                                seed,
+                                conversationId,
+                                template
+                            );
+                            
+                            if (updateResult.success) {
+                                console.log(`🎯 Website update initiated successfully:`, {
+                                    trackingUrl: updateResult.trackingUrl,
+                                    projectId: updateResult.projectId,
+                                    originalProjectId: updateResult.originalProjectId,
+                                    requestId: updateResult.requestId,
+                                    templateChanged: updateResult.templateChanged,
+                                    estimatedTime: updateResult.estimatedTime
+                                });
+                                
+                                output = {
+                                    success: true,
+                                    message: updateResult.message,
+                                    tracking_url: updateResult.trackingUrl,
+                                    project_id: updateResult.projectId,
+                                    original_project_id: updateResult.originalProjectId,
+                                    request_id: updateResult.requestId,
+                                    status_url: updateResult.statusUrl,
+                                    update_type: true,
+                                    estimated_time: updateResult.estimatedTime,
+                                    template_changed: updateResult.templateChanged,
+                                    template_used: template,
+                                    update_prompt_used: update_prompt,
+                                    seed_used: seed,
+                                    processing_note: 'Background polling initiated - user will receive notification when update completed'
+                                };
+                            } else {
+                                // Service returned error response
+                                console.error('❌ Website update initiation failed:', {
+                                    error: updateResult.error,
+                                    message: updateResult.message,
+                                    projectId: project_id,
+                                    updatePrompt: update_prompt.substring(0, 100)
+                                });
+                                
+                                output = {
+                                    success: false,
+                                    error: updateResult.error || 'Error initiating website update',
+                                    message: updateResult.message || 'No se pudo iniciar la actualización del sitio web. Por favor intenta nuevamente.',
+                                    project_id: project_id,
+                                    update_prompt_used: update_prompt
+                                };
+                            }
+                            
+                        } catch (error) {
+                            console.error('❌ Error in updateWebsite tool:', error);
+                            
+                            output = {
+                                success: false,
+                                error: error.message || 'Error updating website',
+                                error_code: 'TOOL_ERROR',
+                                message: 'Hubo un error actualizando tu sitio web. Por favor intenta nuevamente con instrucciones más claras.',
+                                project_id: parsedArgs.project_id || 'unknown',
+                                update_prompt_used: parsedArgs.update_prompt || 'unknown'
                             };
                         }
                         break;
@@ -1428,7 +1573,7 @@ class OpenAIIntegration {
                         output = { 
                             success: false,
                             status: "not_implemented", 
-                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest, createTopupLink, checkCredits, videoGenerator, generateWebsite, healthcare tools`,
+                            message: `Function ${name} is not available in this configuration. Available functions: newRequest, updateRequest, processRequest, getRequestStatus, listActiveRequests, cancelRequest, createTopupLink, checkCredits, videoGenerator, generateWebsite, updateWebsite, healthcare tools`,
                             function_name: name,
                             args: parsedArgs
                         };

@@ -499,7 +499,8 @@ class WebsiteGeneratorWorker {
             );
             
             // Send failure notification to user
-            await this.sendFailureNotification(jobState.conversationId, errorMessage);
+            const isUpdate = jobState.jobType === 'update' || jobState.updateType;
+            await this.sendFailureNotification(jobState.conversationId, errorMessage, isUpdate);
             
             // Update database if using persistence
             await this.updateDatabaseRecord(requestId, 'failed', failureData);
@@ -520,7 +521,12 @@ class WebsiteGeneratorWorker {
      * @param {Object} jobState - Current job state
      */
     async handleJobTimeout(requestId, jobState) {
-        await this.handleJobFailure(requestId, jobState, 'Generation timeout: Process exceeded 20 minutes');
+        const isUpdate = jobState.jobType === 'update' || jobState.updateType;
+        const timeoutMessage = isUpdate 
+            ? 'Website update timeout: Process exceeded 20 minutes'
+            : 'Website generation timeout: Process exceeded 20 minutes';
+            
+        await this.handleJobFailure(requestId, jobState, timeoutMessage);
     }
 
     // ============================================================================
@@ -535,10 +541,15 @@ class WebsiteGeneratorWorker {
      */
     async sendSuccessNotification(conversationId, websiteUrl, completionData) {
         try {
-            const message = `🎉 ¡Tu web ha sido terminada! Échale un vistazo: ${websiteUrl}`;
+            // Different messages for generate vs update
+            const isUpdate = completionData.jobType === 'update' || completionData.updateType;
+            const message = isUpdate 
+                ? `🎉 ¡Tu sitio web ha sido actualizado! Revisa los cambios: ${websiteUrl}`
+                : `🎉 ¡Tu web ha sido terminada! Échale un vistazo: ${websiteUrl}`;
+                
             await this.sendNotificationMessage(conversationId, message);
             
-            console.log(`📱 Success notification sent for conversation: ${conversationId}`);
+            console.log(`📱 ${isUpdate ? 'Update' : 'Generation'} success notification sent for conversation: ${conversationId}`);
             
         } catch (error) {
             console.error(`❌ Failed to send success notification:`, error.message);
@@ -549,13 +560,17 @@ class WebsiteGeneratorWorker {
      * Sends failure notification to user
      * @param {string} conversationId - MongoDB conversation ID  
      * @param {string} errorMessage - Error description
+     * @param {boolean} isUpdate - Whether this was an update job
      */
-    async sendFailureNotification(conversationId, errorMessage) {
+    async sendFailureNotification(conversationId, errorMessage, isUpdate = false) {
         try {
-            const message = `😔 Hubo un problema generando tu sitio web: ${errorMessage}. Por favor intenta nuevamente.`;
+            const message = isUpdate
+                ? `😔 Hubo un problema actualizando tu sitio web: ${errorMessage}. Por favor intenta nuevamente.`
+                : `😔 Hubo un problema generando tu sitio web: ${errorMessage}. Por favor intenta nuevamente.`;
+                
             await this.sendNotificationMessage(conversationId, message);
             
-            console.log(`📱 Failure notification sent for conversation: ${conversationId}`);
+            console.log(`📱 ${isUpdate ? 'Update' : 'Generation'} failure notification sent for conversation: ${conversationId}`);
             
         } catch (error) {
             console.error(`❌ Failed to send failure notification:`, error.message);

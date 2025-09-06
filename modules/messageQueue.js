@@ -438,11 +438,7 @@ class MessageQueue {
       // Wait for the run to complete
       const result = await openAIIntegration.waitForRunCompletion(run.id, conversation.threadId, conversationId);
 
-      if (!redisClient.isOpen) {
-        await redisClient.connect();
-      }
-      await redisClient.del(`activeRun:${conversationId}`);
-      this.activeRuns.delete(conversationId);
+      // Redis lock cleanup moved to finally block for guaranteed execution
 
       // Process the AI response
       if (result.type === 'message') {
@@ -718,6 +714,17 @@ class MessageQueue {
     } catch (error) {
       console.error(`Error processing queue for conversation ${conversationId}:`, error);
     } finally {
+      // 🔧 CRITICAL FIX: Always cleanup Redis lock in finally block
+      try {
+        if (!redisClient.isOpen) {
+          await redisClient.connect();
+        }
+        await redisClient.del(`activeRun:${conversationId}`);
+        this.activeRuns.delete(conversationId);
+        console.log(`🧹 Redis lock cleaned up for conversation: ${conversationId}`);
+      } catch (cleanupError) {
+        console.error(`❌ Error cleaning up Redis lock:`, cleanupError.message);
+      }
 
       if (this.queues.has(conversationId) && this.queues.get(conversationId).length > 0) {
         this.scheduleRetry(conversationId);
