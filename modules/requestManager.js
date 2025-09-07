@@ -74,41 +74,8 @@ class RequestManager {
     }
   }
 
-  /**
-   * Auto-discover recent images from conversation if not provided
-   * @param {string} conversationId - Conversation ID to search  
-   * @param {number} maxImages - Maximum images to find (default 3)
-   * @returns {Array} Array of recent file IDs with successful storage
-   */
-  async autoDiscoverRecentImages(conversationId, maxImages = 3) {
-    try {
-      console.log(`🔍 Auto-discovering recent images in conversation: ${conversationId}`);
-      
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        return [];
-      }
-
-      // Find recent messages with successful file storage
-      const recentImages = conversation.messages
-        .filter(msg => 
-          msg.fileStorage && 
-          msg.fileStorage.status === 'success' && 
-          msg.fileStorage.fileId &&
-          ['image', 'ptt', 'audio', 'video', 'document'].includes(msg.type)
-        )
-        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)) // Most recent first
-        .slice(0, maxImages)
-        .map(msg => msg.fileStorage.fileId);
-
-      console.log(`✅ Auto-discovered ${recentImages.length} recent images:`, recentImages);
-      return recentImages;
-
-    } catch (error) {
-      console.error(`❌ Error auto-discovering images:`, error.message);
-      return [];
-    }
-  }
+  // REMOVED: autoDiscoverRecentImages() function - was causing audio/video to be treated as images
+  // Image tools now only use explicitly provided images to prevent media type confusion
 
   /**
    * Create a new parallel request for image processing
@@ -155,22 +122,16 @@ class RequestManager {
         currentIteration: 0
       });
 
-      // Add initial images if provided, or auto-discover recent ones
+      // Add initial images if provided - NO auto-discovery to prevent audio/video confusion
       let imagesToAdd = initialImages || [];
       
-      // If no initial images provided, auto-discover recent ones from conversation
-      if (imagesToAdd.length === 0) {
-        console.log(`🔍 [${requestId}] No initial images provided, auto-discovering recent images`);
-        const autoDiscoveredImages = await this.autoDiscoverRecentImages(conversationId, 3);
-        imagesToAdd = autoDiscoveredImages;
-        
-        if (imagesToAdd.length > 0) {
-          console.log(`✅ [${requestId}] Auto-discovered ${imagesToAdd.length} recent images for processing`);
-        }
-      }
+      console.log(`🖼️ [${requestId}] Using provided images only - no auto-discovery to prevent media type confusion:`, {
+        providedImages: imagesToAdd.length,
+        allowEmptyArray: true
+      });
       
       if (imagesToAdd && imagesToAdd.length > 0) {
-        console.log(`🖼️ [${requestId}] Adding ${imagesToAdd.length} images`);
+        console.log(`🖼️ [${requestId}] Adding ${imagesToAdd.length} explicit images`);
         for (const imageIdentifier of imagesToAdd) {
           // 🔧 CRITICAL FIX: Resolve file ID correctly
           const resolvedFileId = await this.resolveFileId(imageIdentifier, conversationId, requestId);
@@ -180,6 +141,8 @@ class RequestManager {
             console.error(`❌ [${requestId}] Could not resolve file ID for: ${imageIdentifier}`);
           }
         }
+      } else {
+        console.log(`📝 [${requestId}] No images provided - creating text-only request (empty image array accepted)`);
       }
 
       // Save request to database
