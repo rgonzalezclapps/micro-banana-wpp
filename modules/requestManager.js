@@ -293,9 +293,11 @@ class RequestManager {
         throw new Error('Request is already being processed');
       }
 
-      if (request.inputImages.length === 0) {
-        throw new Error('No images available for processing');
-      }
+      // Allow text-to-image processing (empty inputImages array is valid)
+      console.log(`🎨 [${requestId}] Processing mode:`, {
+        inputImageCount: request.inputImages.length,
+        processingMode: request.inputImages.length === 0 ? 'text-to-image' : 'image-processing'
+      });
 
       // Check iteration limits
       if (request.currentIteration >= request.maxIterations) {

@@ -215,14 +215,23 @@ class GoogleGeminiService {
       // Build conversation context with history - FIXED: pass current turn images only
       const contents = await this.buildGeminiConversation(request, textPrompt, currentTurnImageIds, requestId);
       
-      // Configure request - FORCE image generation with conversation support
+      // Configure request with intelligent modality selection
+      const isTextToImage = currentTurnImageIds.length === 0;
       const config = {
         ...this.DEFAULT_CONFIG,
-        responseModalities: ['IMAGE', 'TEXT'], // Allow both for conversation
+        responseModalities: ['IMAGE', 'TEXT'], // Allow both for all scenarios
         systemInstruction: [{
-          text: (request.systemPrompt || this.getDefaultSystemPrompt()) + "\n\nCRITICAL: You MUST generate and return an IMAGE. Do not return text-only responses."
+          text: isTextToImage 
+            ? (request.systemPrompt || this.getDefaultGenerationPrompt())  // Use generation prompt for text-to-image
+            : (request.systemPrompt || this.getDefaultSystemPrompt())     // Use system prompt for image processing
         }]
       };
+      
+      console.log(`🎨 [${requestId}] Configuration mode:`, {
+        processingMode: isTextToImage ? 'text-to-image' : 'image-processing',
+        currentTurnImages: currentTurnImageIds.length,
+        systemInstructionType: isTextToImage ? 'text-to-image prompt' : 'image processing prompt'
+      });
 
       // Log the request object without blobs for readability
       const requestForLogging = {
@@ -466,9 +475,11 @@ class GoogleGeminiService {
       }
     }
 
-    if (imageContents.length === 0) {
-      throw new Error('No images could be prepared for processing');
-    }
+    // Allow text-only processing for text-to-image scenarios
+    console.log(`🔍 [${requestId}] Image preparation result:`, {
+      imageContentsLength: imageContents.length,
+      processingMode: imageContents.length === 0 ? 'text-only' : 'image-processing'
+    });
 
     return imageContents;
   }
@@ -709,7 +720,7 @@ class GoogleGeminiService {
   getDefaultSystemPrompt() {
     return `You are a professional product photography AI assistant. When given one or multiple images, you MUST create and return a high-resolution, studio-lit product photograph by combining ALL input images into a single professional composition. 
 
-CRITICAL: You MUST generate and return an IMAGE, not just text descriptions. The response must include visual content.
+CRITICAL: You MUST generate and return an IMAGE, do not include text descriptions. The response must include visual content.
 
 Use three-point lighting to highlight key features. Combine all products into one cohesive scene with commercial-grade quality suitable for e-commerce or marketing use. Create ultra-realistic images with sharp focus on key details.
 
@@ -722,7 +733,7 @@ IMPORTANT: Always generate an image as the primary output.`;
   getDefaultGenerationPrompt() {
     return `You are a professional image generation AI. You MUST create and return high-quality, detailed images based on the text description provided. 
 
-CRITICAL: Generate an IMAGE as the primary output, not just text descriptions.
+CRITICAL: Generate an IMAGE as the primary output, do not include text descriptions.
 
 Focus on photorealistic rendering with professional lighting, composition, and attention to detail. The images should be suitable for commercial or professional use.
 
