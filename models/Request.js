@@ -148,7 +148,7 @@ const RequestSchema = new Schema({
   },
   participantId: {
     type: Number,
-    required: true // Reference to PostgreSQL Participant
+    required: true // Reference to MongoDB ParticipantProfile.participantId
   },
   participantName: {
     type: String,

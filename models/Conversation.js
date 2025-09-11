@@ -8,6 +8,30 @@ const MessageChunkSchema = new Schema({
   content: String
 });
 
+// OpenAI Tool Call Context Sub-schemas for perfect structure
+const ToolCallSchema = new Schema({
+  id: String,           // OpenAI tool call ID (e.g., "call_abc123")
+  type: String,         // "function"
+  function: {
+    name: String,       // Tool function name  
+    arguments: String   // JSON string of arguments
+  }
+}, { _id: false });
+
+const ToolResultSchema = new Schema({
+  tool_call_id: String,           // Matches tool_calls[].id
+  role: { type: String, default: 'tool' },  // OpenAI role
+  content: String                 // Tool execution result (JSON string)
+}, { _id: false });
+
+const ExecutionMetadataSchema = new Schema({
+  timestamp: { type: Date, default: Date.now },
+  total_tools: Number,
+  success_count: Number,
+  error_count: Number,
+  processing_time_ms: Number
+}, { _id: false });
+
 const MessageSchema = new Schema({
   sender: {
     type: String,
@@ -77,16 +101,15 @@ const MessageSchema = new Schema({
       return JSON.stringify(data);
     }
   },
-  functionCalls: [{
-    type: {
-      type: String,
-      enum: ['function'],
-      default: 'function'
-    },
-    name: String,
-    parameters: mongoose.Schema.Types.Mixed,
-    updates: [mongoose.Schema.Types.Mixed]
-  }],
+  // OpenAI Responses API - Complete tool call context storage
+  openaiToolContext: {
+    // Exact OpenAI tool_calls format from assistant response
+    tool_calls: [ToolCallSchema],
+    // Exact OpenAI tool results format for context reconstruction  
+    tool_results: [ToolResultSchema],
+    // Metadata for debugging and audit
+    execution_metadata: ExecutionMetadataSchema
+  },
   recipient: {
     type: String,
     enum: ['user', 'operator', 'specialist', 'system'],
@@ -172,11 +195,6 @@ const ConversationSchema = new Schema({
     required: false // Made optional to prevent validation errors
   },
   messages: [MessageSchema],
-  threadId: {
-    type: String,
-    unique: true,
-    required: true
-  },
   unreadCount: {
     type: Number,
     default: 0
@@ -211,11 +229,8 @@ const ConversationSchema = new Schema({
     type: String,
     enum: ['active', 'inactive'],
     default: 'active'
-  },
-  clientId: {
-    type: Number,
-    required: true
   }
+  // clientId removed - no longer needed in clientless architecture
 }, {
   timestamps: true
 });

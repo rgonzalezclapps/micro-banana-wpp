@@ -1,0 +1,38 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "debug_echo",
+      "description": "Debug tool that echoes back the input for testing",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Message to echo back"
+          }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "debug_test",
+      "description": "Simple test tool for debugging",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "test_param": {
+            "type": "string",
+            "description": "Test parameter"
+          }
+        },
+        "required": ["test_param"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

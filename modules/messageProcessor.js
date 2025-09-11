@@ -1,7 +1,7 @@
 const { chunkMessage } = require('../utils/messageUtils');
 const { downloadAndStoreMedia, hasMediaContent } = require('../utils/fileStorageUtils');
 
-async function processMessage(data, type) {
+async function processMessage(data, type, conversationId = null, messageQueue = null) {
   const { body, time } = data;
   let messageContent = '';
   let quotedMessage = null;
@@ -49,8 +49,16 @@ async function processMessage(data, type) {
                               (data.media && typeof data.media === 'object' && data.media.filename) ||
                               null;
 
+      // Generate request ID for media tracking
+      const mediaRequestId = `media_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // 🔥 NEW: Register pending media operation if tracking is available
+      if (conversationId && messageQueue) {
+        messageQueue.addPendingMedia(conversationId, mediaRequestId);
+      }
+      
       // Download and store media using our secure file storage service
-      const storageResult = await downloadAndStoreMedia(data.media, type, originalFilename);
+      const storageResult = await downloadAndStoreMedia(data.media, type, originalFilename, mediaRequestId);
 
       // Update file storage result based on download/upload outcome
       if (storageResult.status === 'success') {
@@ -73,6 +81,11 @@ async function processMessage(data, type) {
           fileSize: fileStorageResult.fileSizeHuman
         });
 
+        // 🔥 NEW: Mark media operation as completed if tracking is available
+        if (conversationId && messageQueue) {
+          messageQueue.completePendingMedia(conversationId, mediaRequestId);
+        }
+
       } else {
         // Storage failed - set error status but continue processing message
         fileStorageResult = {
@@ -87,6 +100,11 @@ async function processMessage(data, type) {
           errorMessage: storageResult.errorMessage,
           requestId: storageResult.requestId
         });
+
+        // 🔥 NEW: Mark media operation as completed even if failed (to unblock queue)
+        if (conversationId && messageQueue) {
+          messageQueue.completePendingMedia(conversationId, mediaRequestId);
+        }
       }
 
     } catch (error) {
@@ -98,6 +116,11 @@ async function processMessage(data, type) {
         errorMessage: error.message,
         requestId: `error_${Date.now()}`
       };
+
+      // 🔥 NEW: Mark media operation as completed even on unexpected error (to unblock queue)
+      if (conversationId && messageQueue && typeof mediaRequestId !== 'undefined') {
+        messageQueue.completePendingMedia(conversationId, mediaRequestId);
+      }
     }
   }
 

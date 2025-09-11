@@ -391,8 +391,8 @@ async function handleMessageReceived(agent, data, event_type, instanceId, provid
   const participant = await getOrCreateParticipant(phoneNumber, pushname);
   let conversation = await getOrCreateConversation(participant, agent);
 
-  // BACK TO SIMPLE ORIGINAL APPROACH
-  const messageData = await processMessage(data, data.type);
+  // 🔥 NEW: Enhanced approach with media completion tracking
+  const messageData = await processMessage(data, data.type, conversation._id.toString(), messageQueue);
   
   // Agregar información del proveedor al messageData para tracking
   messageData.provider = provider;
@@ -403,9 +403,13 @@ async function handleMessageReceived(agent, data, event_type, instanceId, provid
   // Update conversation data and save immediately into database
   conversation = await updateConversationData(conversation, messageData, agent, participant);
 
-  // Pure API - no real-time UI events
-
-  // Pure API - no active conversation UI tracking
+  // 🔍 TRACE: Log messageData right before adding to queue
+  console.log(`[TRACE - handleMessageReceived] messageData for queue:`, {
+    messageId: messageData.msg_foreign_id,
+    hasFileStorage: !!messageData.fileStorage,
+    fileStorageStatus: messageData.fileStorage?.status,
+    fileId: messageData.fileStorage?.fileId
+  });
 
   // Add message to queue
   await messageQueue.addMessage(conversation, messageData, agent);

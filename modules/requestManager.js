@@ -558,7 +558,12 @@ class RequestManager {
    */
   async resolveFileId(imageIdentifier, conversationId, requestId) {
     try {
-      console.log(`🔍 [${requestId}] Resolving file ID for: ${imageIdentifier}`);
+      console.log(`🔍 [${requestId}] Resolving file ID for: ${imageIdentifier}`, {
+        length: imageIdentifier.length,
+        format: imageIdentifier,
+        isHex: /^[a-f0-9]+$/.test(imageIdentifier),
+        is32Chars: imageIdentifier.length === 32
+      });
 
       // Check if it's already a valid file ID format (32-character hex)
       if (/^[a-f0-9]{32}$/.test(imageIdentifier)) {

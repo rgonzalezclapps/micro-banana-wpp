@@ -53,8 +53,9 @@ module.exports = (sequelize, DataTypes) => {
     },
     threadId: {
       type: DataTypes.STRING,
-      allowNull: false,
-      unique: true // Ensure thread uniqueness
+      allowNull: true, // Optional - not needed in Responses API
+      unique: true, // Ensure thread uniqueness when present
+      sparse: true // Allow multiple null values
     }
   }, {
     tableName: 'ParticipantAgentAssociations',
@@ -74,12 +75,12 @@ module.exports = (sequelize, DataTypes) => {
 
   // Define associations with proper foreign key constraints
   ParticipantAgentAssociation.associate = function(models) {
-    // Explicit foreign key definitions for better control
-    ParticipantAgentAssociation.belongsTo(models.Participant, {
-      foreignKey: 'participantId',
-      as: 'participant',
-      onDelete: 'CASCADE'
-    });
+    // Participant relationship moved to MongoDB - no longer needed here
+    // ParticipantAgentAssociation.belongsTo(models.Participant, {
+    //   foreignKey: 'participantId',
+    //   as: 'participant',
+    //   onDelete: 'CASCADE'
+    // });
     
     ParticipantAgentAssociation.belongsTo(models.Agent, {
       foreignKey: 'agentId', 

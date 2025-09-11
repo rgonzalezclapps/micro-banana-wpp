@@ -46,12 +46,13 @@ const MEDIA_TYPE_MAPPING = {
  * @param {string} originalFilename - Original filename if available
  * @returns {Object} Storage result with success/error status and file information
  */
-async function downloadAndStoreMedia(mediaData, messageType, originalFilename = null) {
-  const requestId = `media_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+async function downloadAndStoreMedia(mediaData, messageType, originalFilename = null, providedRequestId = null) {
+  const requestId = providedRequestId || `media_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   console.log(`🗂️ [${requestId}] Starting media download and storage process`, {
     messageType,
     originalFilename,
-    mediaData: mediaData ? 'present' : 'null'
+    mediaData: mediaData ? 'present' : 'null',
+    isTracked: !!providedRequestId
   });
 
   try {

@@ -1,152 +1,93 @@
 /**
- * Payment.js
+ * models/Payment.js
  * 
- * Description: Payment model for MercadoPago credit top-up transactions management
+ * Description: MongoDB model for storing payment records with MercadoPago integration
  * 
- * Role in the system: Manages payment lifecycle from creation to completion, handles MercadoPago integration states
- * 
- * Node.js Context: Model - Sequelize model for PostgreSQL payment transaction data management
- * 
- * Dependencies:
- * - sequelize (ORM for database operations)
- * - DataTypes (Sequelize data type definitions)
- * - Participant model (foreign key relationship)
- * 
- * Dependants:
- * - services/mercadopagoService.js (creates and updates payments)
- * - modules/openaiIntegration.js (creates payments via createTopupLink tool)
- * - routes/webhookRoutes.js (updates payment status via MP notifications)
- * - models/index.js (imports and associates this model)
+ * Role in the system: Replaces PostgreSQL Payments table for a full MongoDB architecture
  */
 
-module.exports = (sequelize, DataTypes) => {
-  const Payment = sequelize.define('Payment', {
-    id: {
-      type: DataTypes.INTEGER,
-      primaryKey: true,
-      autoIncrement: true
-    },
+const mongoose = require('mongoose');
+const Schema = mongoose.Schema;
+
+const PaymentSchema = new Schema({
     participantId: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      references: {
-        model: 'Participants',
-        key: 'id'
-      },
-      onDelete: 'CASCADE'
+        type: Number,
+        required: true,
+        index: true // Refers to ParticipantProfile.participantId
     },
     amount: {
-      type: DataTypes.DECIMAL(10, 2),
-      allowNull: false,
-      validate: {
+        type: Number,
+        required: true,
         min: 1
-      }
     },
     credits: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      validate: {
+        type: Number,
+        required: true,
         min: 1
-      }
     },
     status: {
-      type: DataTypes.ENUM('new', 'pending', 'approved', 'rejected', 'cancelled'),
-      defaultValue: 'new',
-      allowNull: false
+        type: String,
+        enum: ['new', 'pending', 'approved', 'rejected', 'credited', 'error'],
+        default: 'new'
     },
-    // MercadoPago Integration Fields
     mpPaymentId: {
-      type: DataTypes.STRING,
-      allowNull: true
+        type: String,
+        index: true,
+        sparse: true
     },
     mpPreferenceId: {
-      type: DataTypes.STRING,
-      allowNull: true
+        type: String,
+        index: true,
+        sparse: true
     },
     externalReference: {
-      type: DataTypes.STRING,
-      allowNull: true,
-      unique: true
+        type: String,
+        index: true,
+        sparse: true
     },
-    // Additional Fields
     note: {
-      type: DataTypes.STRING(120),
-      allowNull: true
+        type: String,
+        maxLength: 200
     },
     idempotencyKey: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      unique: true
+        type: String,
+        required: true,
+        unique: true
     },
-    // MercadoPago Response Metadata
     metadata: {
-      type: DataTypes.JSON,
-      allowNull: true,
-      defaultValue: {}
+        type: Schema.Types.Mixed
     },
-    // Payment Processing Timestamps
     approvedAt: {
-      type: DataTypes.DATE,
-      allowNull: true
+        type: Date
     },
     creditedAt: {
-      type: DataTypes.DATE,
-      allowNull: true
+        type: Date
     }
-  }, {
-    tableName: 'Payments',
-    underscored: false,
-    indexes: [
-      {
-        fields: ['participantId']
-      },
-      {
-        fields: ['status']
-      },
-      {
-        fields: ['mpPaymentId']
-      },
-      {
-        fields: ['externalReference']
-      },
-      {
-        fields: ['idempotencyKey']
-      }
-    ]
-  });
+}, {
+    timestamps: true,
+    collection: 'payments'
+});
 
-  Payment.associate = function(models) {
-    Payment.belongsTo(models.Participant, { 
-      foreignKey: 'participantId',
-      onDelete: 'CASCADE'
-    });
-  };
+// Indexes for performance
+PaymentSchema.index({ participantId: 1, status: 1 });
+PaymentSchema.index({ idempotencyKey: 1 });
 
-  // Helper methods for payment lifecycle
-  Payment.prototype.markAsPending = function(mpPaymentId, mpPreferenceId) {
-    this.status = 'pending';
-    this.mpPaymentId = mpPaymentId;
-    this.mpPreferenceId = mpPreferenceId;
-    return this.save();
-  };
+/**
+ * Find payment by idempotency key
+ */
+PaymentSchema.statics.findByIdempotencyKey = async function(idempotencyKey) {
+    return this.findOne({ idempotencyKey });
+};
 
-  Payment.prototype.markAsApproved = function(metadata = {}) {
-    this.status = 'approved';
-    this.approvedAt = new Date();
-    this.metadata = { ...this.metadata, ...metadata };
-    return this.save();
-  };
-
-  Payment.prototype.markAsCredited = function() {
+/**
+ * Mark payment as credited
+ */
+PaymentSchema.methods.markAsCredited = function() {
+    this.status = 'credited';
     this.creditedAt = new Date();
     return this.save();
-  };
-
-  Payment.prototype.markAsRejected = function(reason = '') {
-    this.status = 'rejected';
-    this.metadata = { ...this.metadata, rejectionReason: reason };
-    return this.save();
-  };
-
-  return Payment;
 };
+
+const Payment = mongoose.model('Payment', PaymentSchema);
+
+module.exports = Payment;

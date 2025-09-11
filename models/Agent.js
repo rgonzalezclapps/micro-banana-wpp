@@ -32,10 +32,11 @@ module.exports = (sequelize, DataTypes) => {
                 type: DataTypes.ENUM("Ready", "Active", "Paused"),
                 defaultValue: "Ready",
             },
-            clientId: {
-                type: DataTypes.INTEGER,
-                allowNull: false,
-            },
+            // clientId is no longer needed
+            // clientId: {
+            //     type: DataTypes.INTEGER,
+            //     allowNull: false,
+            // },
         },
         {
             tableName: "Agents",
@@ -45,16 +46,17 @@ module.exports = (sequelize, DataTypes) => {
     );
 
     Agent.associate = (models) => {
-        Agent.belongsTo(models.Client, {
-            foreignKey: "clientId",
-            as: "agentClient",
-        });
+        // No longer associated with a Client
+        // Agent.belongsTo(models.Client, {
+        //     foreignKey: "clientId",
+        //     as: "agentClient",
+        // });
         
-        // Many-to-many relationship with Participants through ParticipantAgentAssociations
-        Agent.belongsToMany(models.Participant, { 
-            through: models.ParticipantAgentAssociation,
-            foreignKey: 'agentId'
-        });
+        // Participant relationship moved to MongoDB - no longer needed here
+        // Agent.belongsToMany(models.Participant, { 
+        //     through: models.ParticipantAgentAssociation,
+        //     foreignKey: 'agentId'
+        // });
     };
 
     return Agent;

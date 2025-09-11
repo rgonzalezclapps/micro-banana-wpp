@@ -1,0 +1,139 @@
+{
+  "name": "enhanced_fotoproducto_response_schema",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "description": "Root object for the AI assistant structured response.",
+    "properties": {
+      "timestamp": {
+        "type": "string",
+        "description": "Timestamp of the user last message plus 5 seconds to emulate thinking time"
+      },
+      "thinking": {
+        "type": "string",
+        "description": "Assistant internal reasoning using chain of thought approach"
+      },
+      "response": {
+        "type": "object",
+        "description": "The direct response to be sent to the user.",
+        "properties": {
+          "recipient": {
+            "type": "string",
+            "description": "The recipient of the message, for now, it is always user."
+          },
+          "message": {
+            "type": "string",
+            "description": "Warm, professional reply to the user"
+          }
+        },
+        "required": [
+          "recipient",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "ai_system_message": {
+        "type": "object",
+        "description": "Structured data extracted from the conversation for system use.",
+        "properties": {
+          "lead_info": {
+            "type": "object",
+            "description": "Information captured about the user as a potential lead.",
+            "properties": {
+              "full_name": {
+                "type": "string",
+                "description": "Full name if provided by user, empty string if not provided"
+              },
+              "phone": {
+                "type": "string",
+                "description": "Phone number from webhook if available, empty string otherwise"
+              },
+              "email": {
+                "type": "string",
+                "description": "Empty string by default unless specifically provided"
+              },
+              "company": {
+                "type": "string",
+                "description": "Empty string by default unless specifically mentioned"
+              },
+              "interest": {
+                "type": "string",
+                "description": "Description of image processing type requested or service needed"
+              },
+              "notes": {
+                "type": "string",
+                "description": "Details about processed requests and delivered results"
+              }
+            },
+            "required": [
+              "full_name",
+              "phone",
+              "email",
+              "company",
+              "interest",
+              "notes"
+            ],
+            "additionalProperties": false
+          },
+          "current_flow": {
+            "type": "object",
+            "description": "The current state of the conversation flow.",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "awaiting_name",
+                  "ready_to_process",
+                  "processing_images",
+                  "delivering_results"
+                ],
+                "description": "Current stage in the lead capture and service flow"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "image_processing": {
+            "type": "object",
+            "description": "State and metadata related to image processing tasks.",
+            "properties": {
+              "active_requests": {
+                "type": "string",
+                "description": "Number of active image processing requests as string, 0 if none"
+              },
+              "last_request_id": {
+                "type": "string",
+                "description": "ID of the most recent request if any were processed, empty string if none"
+              },
+              "processing_type": {
+                "type": "string",
+                "description": "Description of the type of image processing performed, empty string if none"
+              }
+            },
+            "required": [
+              "active_requests",
+              "last_request_id",
+              "processing_type"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "lead_info",
+          "current_flow",
+          "image_processing"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "timestamp",
+      "thinking",
+      "response",
+      "ai_system_message"
+    ],
+    "additionalProperties": false
+  }
+}

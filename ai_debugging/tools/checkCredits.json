@@ -1,0 +1,21 @@
+{
+  "type": "function",
+  "function": {
+    "name": "checkCredits",
+    "description": "Consulta el balance actual de créditos del usuario para informarle cuántos créditos tiene disponibles.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "messageToUser": {
+          "type": "string",
+          "description": "EN ESPAÑOL ARGENTINO. Mensaje visible al usuario mientras se procesa, para comunicar valor y estado sin detalles técnicos ni enlaces. Ej.: \"Un momento por favor, estoy consultando tu balance de créditos...\", \"Dale, voy a revisar cuántos créditos tenés disponibles...\", \"Perfecto, te chequeo el saldo ahora mismo...\". Debes variar siempre un poco el mensaje, y hacer alguna mención al pedido que la originó y los detalles clave."
+        }
+      },
+      "required": [
+        "messageToUser"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

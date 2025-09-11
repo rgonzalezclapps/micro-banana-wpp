@@ -1,0 +1,45 @@
+{
+  "type": "function",
+  "function": {
+    "name": "createTopupLink",
+    "description": "Genera un link de pago de Mercado Pago (Checkout Pro) para recargar créditos utilizando monto en ARS o cantidad de créditos.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "amount_ars": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Monto en pesos argentinos (ARS). No enviar si se usa 'credits'."
+        },
+        "credits": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Cantidad de créditos a recargar. 1 crédito = 1 ARS. No enviar si se usa 'amount_ars'."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Texto corto opcional para identificar la recarga, como el contexto de la acción."
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+          "description": "UUID v4 generado para deduplicar la recarga."
+        },
+        "messageToUser": {
+          "type": "string",
+          "description": "EN ESPAÑOL ARGENTINO. Mensaje visible al usuario mientras se procesa, para comunicar valor y estado sin detalles técnicos ni enlaces. Ej.: 'Un momento por favor, estoy generando tu link de pago...', 'Dale, estoy preparando todo para tu recarga de créditos...', 'Perfecto, arranco con la creación de tu link de Mercado Pago...'. Debes variar siempre un poco el mensaje, y hacer alguna mención al pedido que la originó y los detalles clave. Si viene de un audio, podés responder más natural como 'Ok, tu audio es claro, voy a generar el link de pago que me pediste por X créditos...'"
+        }
+      },
+      "required": [
+        "amount_ars",
+        "credits",
+        "note",
+        "idempotencyKey",
+        "messageToUser"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

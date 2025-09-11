@@ -1,0 +1,18 @@
+{
+  "name": "getRequestStatus",
+  "description": "Consultar estado y detalles de un pedido específico (activo, procesando, completado o fallido) y ver historial de pasos. Útil si el usuario pregunta por el estado o si necesitás confirmar antes de comunicar.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "ID del pedido a consultar. Uso interno; no exponer al usuario."
+      }
+    },
+    "required": [
+      "requestId"
+    ],
+    "additionalProperties": false
+  }
+}

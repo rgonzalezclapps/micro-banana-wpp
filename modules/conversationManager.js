@@ -1,5 +1,6 @@
-const { Agent, Participant, ParticipantAgentAssociation } = require("../models");
+const { Agent } = require("../models");
 const Conversation = require("../models/Conversation");
+const ParticipantProfile = require("../models/ParticipantProfile");
 const openAIIntegration = require("./openaiIntegration");
 const { saveWithRetry } = require("../utils/dbUtils");
 // Removed Twenty CRM service dependency
@@ -12,8 +13,7 @@ async function getOrCreateConversation(participant, agent) {
     });
 
     if (!conversation) {
-        // Get or create participant-agent association with thread ID
-        const association = await getOrCreateParticipantAgentAssociation(participant, agent);
+        // No need for separate association - relationship is stored in conversation
         
         // Create new conversation document
         conversation = new Conversation({
@@ -22,8 +22,8 @@ async function getOrCreateConversation(participant, agent) {
             participantName: participant.name,
             agentId: agent.id,
             agentName: agent.name,
-            clientId: agent.clientId,
-            threadId: association.threadId,
+            // clientId removed - no longer needed in clientless architecture
+            // threadId removed - context managed by Conversation.messages
             messages: [],
             lastMessage: null,
             lastMessageTime: new Date(),
@@ -44,37 +44,7 @@ async function getOrCreateConversation(participant, agent) {
     return conversation;
 }
 
-async function getOrCreateParticipantAgentAssociation(participant, agent) {
-    try {
-        // Look for existing association
-        let association = await ParticipantAgentAssociation.findOne({
-            where: {
-                participantId: participant.id,
-                agentId: agent.id
-            }
-        });
-
-        if (!association) {
-            // Create new OpenAI thread for this participant-agent pair
-            const thread = await openAIIntegration.createThread();
-            
-            // Create new association
-            association = await ParticipantAgentAssociation.create({
-                participantId: participant.id,
-                agentId: agent.id,
-                threadId: thread.id
-            });
-            console.log(`Created new participant-agent association: Participant ${participant.id} <-> Agent ${agent.id} (Thread: ${thread.id})`);
-        } else {
-            console.log(`Existing participant-agent association found: Participant ${participant.id} <-> Agent ${agent.id} (Thread: ${association.threadId})`);
-        }
-
-        return association;
-    } catch (error) {
-        console.error('Error in getOrCreateParticipantAgentAssociation:', error);
-        throw error;
-    }
-}
+// ParticipantAgentAssociation removed - relationship stored in Conversation document
 
 async function updateConversationData(conversation, messageData, agent, participant) {
     try {
@@ -145,7 +115,7 @@ function formatConversationForList(conversation) {
         phoneNumber: conversation.phoneNumber,
         participantName: conversation.participantName || "Unknown",
         agentId: conversation.agentId,
-        clientId: conversation.clientId,
+        // clientId removed - no longer needed
         lastMessage: conversation.lastMessage,
         lastMessageTime: conversation.lastMessageTime,
         lastMessageSender: conversation.lastMessageSender,
@@ -160,30 +130,52 @@ function formatConversationForList(conversation) {
 
 async function getOrCreateParticipant(phoneNumber, pushname) {
     try {
-        // Look for existing participant by phone number
-        let participant = await Participant.findOne({
-            where: { phoneNumber: phoneNumber }
-        });
+        // Direct MongoDB lookup - NO PostgreSQL fallback
+        let participant = await ParticipantProfile.findByPhone(phoneNumber);
 
         if (!participant) {
-            // Create new participant
-            participant = await Participant.create({
+            // Create new participant directly in MongoDB
+            const participantData = {
+                participantId: Date.now(), // Generate unique ID
                 phoneNumber: phoneNumber,
                 name: pushname || "Unknown",
-                status: 'active'
-            });
-            console.log(`Created new participant: ${participant.name} (${participant.phoneNumber})`);
+                status: 'active',
+                creditBalance: 0,
+                metadata: {
+                    createdVia: 'webhook'
+                }
+            };
+            
+            participant = await ParticipantProfile.create(participantData);
+            console.log(`Created new participant in MongoDB: ${participant.name} (${participant.phoneNumber})`);
+            
+            // Return formatted for compatibility
+            return {
+                id: participant.participantId,
+                name: participant.name,
+                phoneNumber: participant.phoneNumber,
+                status: participant.status,
+                creditBalance: participant.creditBalance
+            };
         } else {
-            // Update name if pushname is provided and current name is "Unknown"
+            // Update name if needed
             if (pushname && (participant.name === "Unknown" || !participant.name)) {
                 participant.name = pushname;
                 await participant.save();
                 console.log(`Updated participant name: ${participant.name} (${participant.phoneNumber})`);
             }
-            console.log(`Existing participant found: ${participant.name} (${participant.phoneNumber})`);
+            console.log(`Existing participant found in MongoDB: ${participant.name} (${participant.phoneNumber})`);
+            
+            // Return formatted for compatibility
+            return {
+                id: participant.participantId,
+                name: participant.name,
+                phoneNumber: participant.phoneNumber,
+                status: participant.status,
+                creditBalance: participant.creditBalance
+            };
         }
 
-        return participant;
     } catch (error) {
         console.error('Error in getOrCreateParticipant:', error);
         throw error;
@@ -213,6 +205,6 @@ module.exports = {
     updateConversationPatientName,
     formatConversationForList,
     getOrCreateParticipant,
-    getOrCreateParticipantAgentAssociation,
+    // getOrCreateParticipantAgentAssociation removed - not needed
     createCRMConversationIfDelfino
 };

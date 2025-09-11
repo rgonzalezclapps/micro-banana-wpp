@@ -81,7 +81,12 @@ class GoogleGeminiService {
                   parts.push({ inlineData: imageData });
                 }
               } catch (imageError) {
-                console.warn(`⚠️ [${requestId}] Failed to load conversation image ${part.content}:`, imageError.message);
+                // 🔧 GRACEFUL DEGRADATION: Skip missing images from conversation history
+                if (imageError.response?.status === 404) {
+                  console.log(`🔍 [${requestId}] Skipping missing conversation image ${part.content} (404 - likely expired/deleted)`);
+                } else {
+                  console.warn(`⚠️ [${requestId}] Failed to load conversation image ${part.content}:`, imageError.message);
+                }
                 // Continue without this image rather than failing entire conversation
               }
             }
@@ -99,18 +104,15 @@ class GoogleGeminiService {
       // Add current user turn
       const currentParts = [{ text: currentPrompt }];
       
-      // Add ONLY current turn images (not all inputImages from history)
+      // Add ONLY current turn images using ROBUST method (not all inputImages from history)
       console.log(`🖼️ [${requestId}] Adding ${currentTurnImages.length} images to current turn (NOT ${request.inputImages.length} total images)`);
-      for (const imageFileId of currentTurnImages) {
-        try {
-          const imageData = await this.loadImageForConversation(imageFileId, requestId);
-          if (imageData) {
-            currentParts.push({ inlineData: imageData });
-          }
-        } catch (imageError) {
-          console.warn(`⚠️ [${requestId}] Failed to load current turn image ${imageFileId}:`, imageError.message);
-          // Continue without this image
+      if (currentTurnImages.length > 0) {
+        // Use the SAME robust method that works for prepareImagesForGemini
+        const imageContents = await this.prepareImagesForGemini(currentTurnImages, requestId);
+        for (const imageContent of imageContents) {
+          currentParts.push(imageContent);
         }
+        console.log(`✅ [${requestId}] Successfully prepared ${imageContents.length}/${currentTurnImages.length} current turn images`);
       }
       
       contents.push({
@@ -144,40 +146,18 @@ class GoogleGeminiService {
   }
 
   /**
-   * Load image from storage for conversation context
-   * @param {string} fileId - File ID from our storage system
-   * @param {string} requestId - Request ID for logging
-   * @returns {Object|null} Image data for Gemini or null if failed
+   * Load image from storage for conversation context - DEPRECATED, USE prepareImagesForGemini INSTEAD
+   * @deprecated This method is less robust than prepareImagesForGemini
    */
   async loadImageForConversation(fileId, requestId) {
+    console.log(`⚠️ [${requestId}] DEPRECATED: Using loadImageForConversation for ${fileId} - should use prepareImagesForGemini instead`);
+    
+    // Redirect to robust method
     try {
-      // Create download URL for the image
-      const downloadUrl = createDownloadUrl(fileId);
-      
-      console.log(`📥 [${requestId}] Loading conversation image: ${fileId}`);
-      
-      // Download image data
-      const response = await axios.get(downloadUrl, {
-        responseType: 'arraybuffer',
-        timeout: this.REQUEST_TIMEOUT,
-        headers: {
-          'Accept': 'image/*'
-        }
-      });
-
-      // Convert to base64
-      const base64Image = Buffer.from(response.data).toString('base64');
-      
-      // Get MIME type from response headers or guess from file
-      const mimeType = response.headers['content-type'] || 'image/jpeg';
-      
-      return {
-        mimeType,
-        data: base64Image
-      };
-      
+      const imageContents = await this.prepareImagesForGemini([fileId], requestId);
+      return imageContents.length > 0 ? imageContents[0].inlineData : null;
     } catch (error) {
-      console.error(`❌ [${requestId}] Failed to load conversation image ${fileId}:`, error.message);
+      console.error(`❌ [${requestId}] Failed to load conversation image via robust method ${fileId}:`, error.message);
       return null;
     }
   }
@@ -428,13 +408,21 @@ class GoogleGeminiService {
       try {
         // Get download URL from our file storage
         const downloadUrl = createDownloadUrl(fileId);
+
+        console.log(`📥 [${requestId}] Download URL: ${downloadUrl}`);
         
-        // Download image from our storage
+        // Download image from our storage with better timeout and retry
         const imageResponse = await axios({
           method: 'get',
           url: downloadUrl,
           responseType: 'arraybuffer',
-          timeout: 30000
+          timeout: 60000, // Increased from 30s to 60s
+          headers: {
+            'User-Agent': 'Micro-Banana-ImageProcessor/1.0',
+            'X-API-Key': process.env.API_KEY_WEBHOOK // 🔥 CRITICAL FIX: Add API Key to header
+          },
+          maxContentLength: this.MAX_FILE_SIZE,
+          maxBodyLength: this.MAX_FILE_SIZE
         });
 
         if (imageResponse.status !== 200) {
@@ -471,6 +459,43 @@ class GoogleGeminiService {
 
       } catch (error) {
         console.error(`❌ [${requestId}] Failed to prepare image ${fileId}:`, error.message);
+        
+        // For timeout errors, try one more time with extended timeout
+        if (error.code === 'ECONNABORTED' && error.message.includes('timeout')) {
+          console.log(`🔄 [${requestId}] Retrying image download for ${fileId} with extended timeout...`);
+          try {
+            const downloadUrl = createDownloadUrl(fileId);
+            const retryResponse = await axios({
+              method: 'get',
+              url: downloadUrl,
+              responseType: 'arraybuffer',
+              timeout: 90000, // 90 seconds for retry
+              headers: {
+                'User-Agent': 'Micro-Banana-ImageProcessor/1.0',
+                'X-API-Key': process.env.API_KEY_WEBHOOK // 🔥 CRITICAL FIX: Add API Key to header
+              },
+              maxContentLength: this.MAX_FILE_SIZE,
+              maxBodyLength: this.MAX_FILE_SIZE
+            });
+            
+            if (retryResponse.status === 200) {
+              const base64Image = Buffer.from(retryResponse.data).toString('base64');
+              const mimeType = retryResponse.headers['content-type'] || 'image/jpeg';
+              
+              imageContents.push({
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Image
+                }
+              });
+              
+              console.log(`✅ [${requestId}] Retry successful for ${fileId}`);
+            }
+          } catch (retryError) {
+            console.error(`❌ [${requestId}] Retry also failed for ${fileId}:`, retryError.message);
+          }
+        }
+        
         // Continue with other images instead of failing completely
       }
     }

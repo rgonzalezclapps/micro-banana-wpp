@@ -18,12 +18,12 @@ fs
     db[model.name] = model;
   });
 
-// Generic chatbot engine models - complete participant system
-db.Agent = require('./Agent')(sequelize, Sequelize.DataTypes);
-db.Client = require('./Client')(sequelize, Sequelize.DataTypes);
-db.Participant = require('./Participant')(sequelize, Sequelize.DataTypes);
-db.ParticipantAgentAssociation = require('./ParticipantAgentAssociation')(sequelize, Sequelize.DataTypes);
-db.Payment = require('./Payment')(sequelize, Sequelize.DataTypes);
+  // Generic chatbot engine models - MongoDB-first architecture
+  db.Agent = require('./Agent')(sequelize, Sequelize.DataTypes);
+  // db.Client = require('./Client')(sequelize, Sequelize.DataTypes); // Client model removed
+  // db.Participant = require('./Participant')(sequelize, Sequelize.DataTypes); // Participant moved to MongoDB
+  db.ParticipantAgentAssociation = require('./ParticipantAgentAssociation')(sequelize, Sequelize.DataTypes);
+  // db.Payment = require('./Payment')(sequelize, Sequelize.DataTypes); // Payment moved to MongoDB
 
 // Website generation system - handled by automatic loop above
 
@@ -39,5 +39,10 @@ db.Sequelize = Sequelize;
 // MongoDB models (Mongoose) - Added for request processing system
 db.Conversation = require('./Conversation');
 db.Request = require('./Request');
+db.Payment = require('./Payment');
+db.ParticipantProfile = require('./ParticipantProfile');
+db.PaymentRecord = require('./PaymentRecord');
+db.AgentConfig = require('./AgentConfig');
+db.ToolSchema = require('./ToolSchema');
 
 module.exports = db;

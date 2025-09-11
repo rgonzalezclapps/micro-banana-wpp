@@ -1,0 +1,14 @@
+{
+  "type": "function",
+  "function": {
+    "name": "listActiveRequests",
+    "description": "Listar todos los pedidos activos de la conversación. Útil para gestionar múltiples flujos en paralelo (p.ej., diferentes productos/campañas) y decidir cuál continuar o cerrar. No muestra ni filtra información sensible al usuario automáticamente.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+}

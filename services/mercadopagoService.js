@@ -344,9 +344,10 @@ class MercadoPagoService {
         });
 
         // Credit participant balance
-        const participant = await Participant.findByPk(payment.participantId);
+        const ParticipantProfile = require('../models/ParticipantProfile');
+        const participant = await ParticipantProfile.findByParticipantId(payment.participantId);
         if (participant) {
-          await participant.addCredits(payment.credits);
+          await participant.updateCredits(payment.credits, 'add');
           await payment.markAsCredited();
           
           console.log('💰 Credits added to participant:', {

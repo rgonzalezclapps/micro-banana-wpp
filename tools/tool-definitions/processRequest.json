@@ -1,0 +1,28 @@
+{
+  "name": "processRequest",
+  "description": "Ejecutar el procesamiento para generar el resultado final con Google Gemini. Llamalo SOLO después de que el usuario confirme explícitamente que NO sumará más imágenes ni aclaraciones para ese pedido. `finalPrompt` en INGLÉS y conciso. Podés usar `messageToUser` para dar feedback humano durante el proceso (en español argentino), agregando valor sin revelar detalles internos (nunca URLs ni IDs).",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "ID del pedido a procesar. Uso interno; no se expone al usuario."
+      },
+      "finalPrompt": {
+        "type": "string",
+        "description": "IN ENGLISH. Indicación final breve que consolida la intención. Recomendado: 'Generate the final studio-grade result keeping all constraints. Preserve true-to-life color, clean edges, realistic shadows, and consistent lighting.'"
+      },
+      "messageToUser": {
+        "type": "string",
+        "description": "EN ESPAÑOL ARGENTINO. Mensaje visible al usuario mientras se procesa, para comunicar valor y estado sin detalles técnicos ni enlaces. Ej.: 'Un momento por favor, estoy procesando tu solicitud...', 'Dale, estoy trabajando en tus imágenes ahora...', 'Perfecto, arranco con el procesamiento de tu pedido...'. Debes variar siempre un poco el mensaje, y hacer alguna mención al pedido que la originó y los detalles clave. Si viene de un audio, podés responder más natural como 'Ok, tu audio es claro, voy a proceder a generar las imágenes que me pediste...'"
+      }
+    },
+    "required": [
+      "requestId",
+      "finalPrompt",
+      "messageToUser"
+    ],
+    "additionalProperties": false
+  }
+}

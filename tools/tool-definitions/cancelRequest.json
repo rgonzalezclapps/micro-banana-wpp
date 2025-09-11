@@ -1,0 +1,18 @@
+{
+  "name": "cancelRequest",
+  "description": "Cancelar un pedido activo que ya no corresponda continuar (el usuario quiere empezar de cero, cambió el alcance, etc.). Confirmá brevemente la cancelación en español argentino sin mencionar IDs ni infraestructura.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "ID del pedido a cancelar. Uso interno; no exponer al usuario."
+      }
+    },
+    "required": [
+      "requestId"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "updateRequest",
+  "description": "Refinar o ampliar un pedido YA creado. Usalo para: a) agregar imágenes nuevas al mismo pedido; b) ajustar direcciones creativas o técnicas (siempre en INGLÉS). Esto mantiene la continuidad de estilo/iluminación y evita fragmentar la producción. No expongas nunca URLs ni IDs al usuario.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "requestId": {
+        "type": "string",
+        "description": "ID del pedido a actualizar (obtenido de `newRequest` o de llamadas previas). Usalo internamente; NO lo muestres al usuario."
+      },
+      "newImages": {
+        "type": "array",
+        "description": "Array de nuevos `fileStorage.fileId` (32 hex) a incorporar. Dejar vacío si no hay imágenes adicionales. NO uses message_id; SIEMPRE `fileStorage.fileId` con status='success'.",
+        "items": {
+          "type": "string",
+          "description": "ID criptográfico seguro del storage (p.ej. '6a8b31e539d4518206ecc11834a250a3')."
+        }
+      },
+      "instructions": {
+        "type": "string",
+        "description": "IN ENGLISH. Instrucciones incrementales y precisas que se suman al contexto existente. Ej.: 'Increase background cleanliness; brighter white (D65); keep product colors true-to-life; maintain natural texture; no halo edges.'"
+      }
+    },
+    "required": [
+      "requestId",
+      "newImages",
+      "instructions"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -21,11 +21,24 @@ class MessageQueue {
     this.maxQueueWaitTime = 30000; // 30 seconds
     this.processAudioMessage = false; // Add this line
     this.retryInterval = 1000; // 1 second
+    
+    // 🔥 NEW: Media completion tracking to prevent race conditions
+    this.pendingMedia = new Map(); // conversationId -> Set of pending media requestIds
+    this.mediaCompletionTimers = new Map(); // conversationId -> cleanup timer
+    this.mediaTimeout = 15000; // 15 seconds timeout for media operations
   }
 
   async addMessage(conversation, messageData, agent = null) {
     const conversationId = conversation._id.toString();
     
+    // 🔍 TRACE: Log messageData upon arrival in the queue
+    console.log(`[TRACE - addMessage] Received messageData:`, {
+      messageId: messageData.msg_foreign_id,
+      hasFileStorage: !!messageData.fileStorage,
+      fileStorageStatus: messageData.fileStorage?.status,
+      fileId: messageData.fileStorage?.fileId
+    });
+
     if (!this.queues.has(conversationId)) {
       this.queues.set(conversationId, []);
       console.log('Queue created for conversation:', conversationId);
@@ -35,6 +48,16 @@ class MessageQueue {
 
     // Add message to queue
     queue.push(messageData);
+
+    // 🔍 DIAGNOSTIC: Show media tracking status
+    const pendingMediaCount = this.pendingMedia.get(conversationId)?.size || 0;
+    console.log(`📦 [${conversationId}] Message added to queue`, {
+      queueLength: queue.length,
+      messageType: messageData.ultraMsgData.type,
+      hasFileStorage: messageData.fileStorage?.status !== 'not_applicable',
+      fileStorageStatus: messageData.fileStorage?.status,
+      pendingMediaOperations: pendingMediaCount
+    });
 
     // Handle audio messages
     if (messageData.ultraMsgData.type === 'ptt' || messageData.ultraMsgData.type === 'audio') {
@@ -48,6 +71,89 @@ class MessageQueue {
     }
 
     this.resetQueueTimer(conversationId);
+  }
+
+  /**
+   * Register a pending media operation for a conversation
+   * @param {string} conversationId - Conversation ID
+   * @param {string} mediaRequestId - Media processing request ID
+   */
+  addPendingMedia(conversationId, mediaRequestId) {
+    if (!this.pendingMedia.has(conversationId)) {
+      this.pendingMedia.set(conversationId, new Set());
+    }
+    
+    this.pendingMedia.get(conversationId).add(mediaRequestId);
+    
+    console.log(`📁 [${conversationId}] Registered pending media: ${mediaRequestId}`, {
+      totalPending: this.pendingMedia.get(conversationId).size
+    });
+    
+    // Set cleanup timer for this conversation's media operations
+    this.setMediaCompletionTimer(conversationId);
+  }
+
+  /**
+   * Mark a media operation as completed
+   * @param {string} conversationId - Conversation ID  
+   * @param {string} mediaRequestId - Media processing request ID
+   */
+  completePendingMedia(conversationId, mediaRequestId) {
+    if (!this.pendingMedia.has(conversationId)) {
+      return;
+    }
+    
+    const pendingSet = this.pendingMedia.get(conversationId);
+    pendingSet.delete(mediaRequestId);
+    
+    console.log(`✅ [${conversationId}] Media completed: ${mediaRequestId}`, {
+      remainingPending: pendingSet.size
+    });
+    
+    // If all media operations are complete, reset queue timer
+    if (pendingSet.size === 0) {
+      console.log(`🎯 [${conversationId}] ALL media operations completed - resetting queue timer`);
+      this.pendingMedia.delete(conversationId);
+      this.clearMediaCompletionTimer(conversationId);
+      this.resetQueueTimer(conversationId);
+    }
+  }
+
+  /**
+   * Check if conversation has pending media operations
+   * @param {string} conversationId - Conversation ID
+   * @returns {boolean} True if media operations are pending
+   */
+  hasPendingMedia(conversationId) {
+    const pendingSet = this.pendingMedia.get(conversationId);
+    return pendingSet && pendingSet.size > 0;
+  }
+
+  /**
+   * Set cleanup timer for media operations (timeout protection)
+   */
+  setMediaCompletionTimer(conversationId) {
+    // Clear existing timer
+    this.clearMediaCompletionTimer(conversationId);
+    
+    // Set new timer with timeout
+    const timer = setTimeout(() => {
+      console.log(`⚠️ [${conversationId}] Media completion timeout reached - forcing queue reset`);
+      this.pendingMedia.delete(conversationId);
+      this.resetQueueTimer(conversationId);
+    }, this.mediaTimeout);
+    
+    this.mediaCompletionTimers.set(conversationId, timer);
+  }
+
+  /**
+   * Clear media completion timer
+   */
+  clearMediaCompletionTimer(conversationId) {
+    if (this.mediaCompletionTimers.has(conversationId)) {
+      clearTimeout(this.mediaCompletionTimers.get(conversationId));
+      this.mediaCompletionTimers.delete(conversationId);
+    }
   }
 
   async handleAudioMessage(conversation, queue, agent = null) {
@@ -288,6 +394,14 @@ class MessageQueue {
   }
 
   resetQueueTimer(conversationId) {
+    // 🔥 CRITICAL: Check for pending media operations before resetting timer
+    if (this.hasPendingMedia(conversationId)) {
+      console.log(`⏳ [${conversationId}] Pending media operations detected - delaying queue timer reset`, {
+        pendingCount: this.pendingMedia.get(conversationId)?.size || 0
+      });
+      return; // Don't reset timer until all media operations complete
+    }
+    
     if (this.queueTimers.has(conversationId)) {
       clearTimeout(this.queueTimers.get(conversationId));
       console.log(`Cleared existing timer for conversation: ${conversationId}`);
@@ -298,6 +412,7 @@ class MessageQueue {
     }, this.queueInterval);
 
     this.queueTimers.set(conversationId, timer);
+    console.log(`🕐 [${conversationId}] Queue timer reset - will process in ${this.queueInterval}ms`);
   }
 
   async processQueue(conversationId) {
@@ -368,16 +483,26 @@ class MessageQueue {
       }
 
       // TO DO ASAP - Implement fallback with Claude
-      const agent = await Agent.findByPk(conversation.agentId);
+      let agent;
+      try {
+        agent = await Agent.findByPk(conversation.agentId);
+      } catch (dbError) {
+        if (dbError.name === 'SequelizeDatabaseError' && dbError.original?.code === 'ECONNRESET') {
+          console.warn(`⚠️ [${conversationId}] DB connection reset on Agent.findByPk. Retrying once...`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // wait 1 sec
+          agent = await Agent.findByPk(conversation.agentId); // Retry
+        } else {
+          throw dbError; // Re-throw other errors
+        }
+      }
+
       if (!agent) {
         console.error(`Agent not found for conversation: ${conversationId}`);
         return;
       }
 
-      if (!agent.assistantId) {
-        console.error(`Assistant ID not found for agent: ${agent.id}`);
-        return;
-      }
+      // assistantId no longer needed for Responses API
+      console.log(`✅ [${conversationId}] Agent found: ${agent.name} (ID: ${agent.id})`);
 
       // Prepare messages for OpenAI
       const openAiMessages = processedQueue.map(msg => {
@@ -429,20 +554,25 @@ class MessageQueue {
         hasSystemMessage: !!openAiObject.system_message
       });
 
-      // Send queue to OpenAI
-      await openAIIntegration.addMessageToThread(conversation.threadId, JSON.stringify(openAiObject));
-
-      // Run the assistant
-      const run = await openAIIntegration.runAssistant(agent.assistantId, conversation.threadId);
-
-      // Wait for the run to complete
-      const result = await openAIIntegration.waitForRunCompletion(run.id, conversation.threadId, conversationId);
+      // Process with Responses API (replaces thread/run/wait workflow)
+      const result = await openAIIntegration.processConversationMessage(conversationId, JSON.stringify(openAiObject));
 
       // Redis lock cleanup moved to finally block for guaranteed execution
 
       // Process the AI response
       if (result.type === 'message') {
-        const aiResponse = JSON.parse(result.content);
+        let aiResponse;
+        try {
+          aiResponse = JSON.parse(result.content);
+        } catch (jsonError) {
+          console.error(`❌ [${conversationId}] Invalid JSON in AI response:`, {
+            error: jsonError.message,
+            contentLength: result.content?.length || 0,
+            contentPreview: result.content?.substring(0, 200) || 'empty'
+          });
+          // To Do: Implement solution to handle invalid JSON in AI response.
+        }
+        
         const { timestamp, thinking, ai_system_message, response } = aiResponse;
 
         // Create a new message object for the AI response
@@ -456,6 +586,50 @@ class MessageQueue {
           recipient: response.recipient,
           type: 'chat'
         };
+
+        // 🔥 NEW ARCHITECTURE: Add tool context to AI message if tools were used
+        if (result.hasTools && result.toolCalls && result.toolCalls.length > 0) {
+          console.log(`💾 [${conversationId}] Adding tool context to AI message: ${result.toolCalls.length} tools used`);
+          
+          // Calculate success/error counts
+          const successCount = (result.toolResults || []).filter(r => !r.error).length;
+          const errorCount = (result.toolResults || []).filter(r => r.error).length;
+          
+          // Build OpenAI-compatible tool context for perfect reconstruction
+          newMessage.openaiToolContext = {
+            // Exact OpenAI tool_calls format (as received from OpenAI)
+            tool_calls: result.toolCalls.map(call => ({
+              id: call.id,
+              type: call.type || 'function',
+              function: {
+                name: call.function.name,
+                arguments: call.function.arguments // Keep as JSON string (OpenAI format)
+              }
+            })),
+            
+            // Exact OpenAI tool results format (for context reconstruction)
+            tool_results: (result.toolResults || []).map(toolResult => ({
+              tool_call_id: toolResult.tool_call_id,
+              role: 'tool',
+              content: toolResult.output // Keep as string (OpenAI expects string content)
+            })),
+            
+            // Metadata for debugging and audit trail
+            execution_metadata: {
+              timestamp: new Date(),
+              total_tools: result.toolCalls.length,
+              success_count: successCount,
+              error_count: errorCount,
+              processing_time_ms: 0 // Will be calculated if needed
+            }
+          };
+          
+          console.log(`✅ [${conversationId}] Tool context added to AI message successfully`, {
+            toolCount: result.toolCalls.length,
+            successCount,
+            errorCount
+          });
+        }
 
         // Add the AI response to the conversation
         conversation.messages.push(newMessage);
@@ -535,15 +709,22 @@ class MessageQueue {
                     
                     if (isLastMessage && hasGeneratedImages) {
                       // Last message with images - use smart sending
-                      const imageToolResult = result.toolResults.find(tool => 
-                        tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
-                      );
+                      const imageToolResult = result.toolResults.find(tool => {
+                        try {
+                          const parsedOutput = JSON.parse(tool.output);
+                          return parsedOutput.result && parsedOutput.result.generatedImages && parsedOutput.result.generatedImages.length > 0;
+                        } catch (parseError) {
+                          return false;
+                        }
+                      });
                       
-                      if (imageToolResult && imageToolResult.result) {
-                        const smartContent = {
-                          textResponse: response.message,
-                          generatedImages: imageToolResult.result.generatedImages
-                        };
+                      if (imageToolResult) {
+                        try {
+                          const parsedOutput = JSON.parse(imageToolResult.output);
+                          const smartContent = {
+                            textResponse: response.message,
+                            generatedImages: parsedOutput.result.generatedImages
+                          };
                         
                         console.log(`📤 [SEQUENTIAL] Using sequential delivery for quoted message with images`);
                         const sequentialResult = await sequentialMessageService.sendMultipleGeminiResults(
@@ -553,9 +734,14 @@ class MessageQueue {
                           `queue-${conversation._id}`
                         );
                         
-                        // Format response for compatibility
-                        const firstDelivery = sequentialResult[0];
-                        messageResponse = firstDelivery?.result || { sent: 'false', message: 'Sequential delivery failed' };
+                          // Format response for compatibility
+                          const firstDelivery = sequentialResult[0];
+                          messageResponse = firstDelivery?.result || { sent: 'false', message: 'Sequential delivery failed' };
+                          
+                        } catch (quotedImageParseError) {
+                          console.error(`❌ [${conversationId}] Failed to parse quoted image tool result:`, quotedImageParseError.message);
+                          messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message, messageToQuote);
+                        }
                       } else {
                         messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message, messageToQuote);
                       }
@@ -572,9 +758,34 @@ class MessageQueue {
                 }
               } else {
                 // 🔧 SMART RESPONSE ROUTING: Check if response contains generated content (images or videos)
-                const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => 
-                  tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
-                );
+                const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => {
+                  try {
+                    const parsedOutput = JSON.parse(tool.output);
+                    return parsedOutput.result && parsedOutput.result.generatedImages && parsedOutput.result.generatedImages.length > 0;
+                  } catch (parseError) {
+                    console.error(`❌ Failed to parse tool output for image detection:`, parseError.message);
+                    return false;
+                  }
+                });
+                
+                // 🔍 DIAGNOSTIC: Show image detection results
+                console.log(`🔍 [${conversationId}] Image detection analysis:`, {
+                  hasGeneratedImages,
+                  toolResultsCount: result.toolResults?.length || 0,
+                  toolResults: result.toolResults?.map(tool => {
+                    try {
+                      const parsed = JSON.parse(tool.output);
+                      return {
+                        toolCallId: tool.tool_call_id,
+                        hasResult: !!parsed.result,
+                        hasGeneratedImages: !!(parsed.result?.generatedImages?.length),
+                        imageCount: parsed.result?.generatedImages?.length || 0
+                      };
+                    } catch (e) {
+                      return { toolCallId: tool.tool_call_id, parseError: true };
+                    }
+                  }) || []
+                });
                 
                 const hasGeneratedVideo = result.toolResults && result.toolResults.some(tool => {
                   console.log('🔍 [VIDEO-TRACE] Checking tool result for video (destructured):', {
@@ -653,36 +864,49 @@ class MessageQueue {
                   console.log(`🖼️ [ULTRAMSG] Response contains generated images, using smart sending`);
                   
                   // Extract image content from tool results
-                  const imageToolResult = result.toolResults.find(tool => 
-                    tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
-                  );
+                  const imageToolResult = result.toolResults.find(tool => {
+                    try {
+                      const parsedOutput = JSON.parse(tool.output);
+                      return parsedOutput.result && parsedOutput.result.generatedImages && parsedOutput.result.generatedImages.length > 0;
+                    } catch (parseError) {
+                      console.error(`❌ Failed to parse tool output for image extraction:`, parseError.message);
+                      return false;
+                    }
+                  });
                   
-                  if (imageToolResult && imageToolResult.result) {
-                                      const smartContent = {
-                    textResponse: response.message,
-                    generatedImages: imageToolResult.result.generatedImages
-                  };
-                  
-                  console.log(`📤 [SEQUENTIAL] Using sequential delivery for multiple outputs`);
-                  const sequentialResult = await sequentialMessageService.sendMultipleGeminiResults(
-                    agent, 
-                    conversation.phoneNumber, 
-                    smartContent, 
-                    `queue-${conversation._id}`
-                  );
-                  
-                  // Format response for compatibility with existing flow
-                  const successfulDeliveries = sequentialResult.filter(d => d.result.sent === 'true');
-                  if (successfulDeliveries.length > 0) {
-                    messageResponse = successfulDeliveries[0].result;
+                  if (imageToolResult) {
+                    try {
+                      const parsedOutput = JSON.parse(imageToolResult.output);
+                      const smartContent = {
+                        textResponse: response.message,
+                        generatedImages: parsedOutput.result.generatedImages
+                      };
+                      
+                      console.log(`📤 [SEQUENTIAL] Using sequential delivery for multiple outputs`);
+                      const sequentialResult = await sequentialMessageService.sendMultipleGeminiResults(
+                        agent, 
+                        conversation.phoneNumber, 
+                        smartContent, 
+                        `queue-${conversation._id}`
+                      );
+                      
+                      // Format response for compatibility with existing flow
+                      const successfulDeliveries = sequentialResult.filter(d => d.result.sent === 'true');
+                      if (successfulDeliveries.length > 0) {
+                        messageResponse = successfulDeliveries[0].result;
+                      } else {
+                        messageResponse = { sent: 'false', message: 'All sequential deliveries failed' };
+                      }
+                      
+                    } catch (imageParseError) {
+                      console.error(`❌ [${conversationId}] Failed to parse image tool result:`, imageParseError.message);
+                      messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                    }
                   } else {
-                    messageResponse = { sent: 'false', message: 'All sequential deliveries failed' };
+                    // Fallback to regular text if image extraction fails
+                    messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
                   }
                 } else {
-                  // Fallback to regular text if image extraction fails
-                  messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
-                }
-              } else {
                 // No images, send text normally
                 console.log(`📝 [ULTRAMSG] Text-only response, using regular sending`);
                 messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);

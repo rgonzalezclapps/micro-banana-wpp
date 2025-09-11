@@ -1,0 +1,26 @@
+{
+  "type": "function",
+  "function": {
+    "name": "generateWebsite",
+    "description": "Genera un sitio web completo y profesional basado en la descripción proporcionada y muestra un mensaje de espera al usuario.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "Descripción del sitio web que se va a generar."
+        },
+        "messageToUser": {
+          "type": "string",
+          "description": "Mensaje en español argentino para informar al usuario que espere y que puede seguir conversando mientras tanto."
+        }
+      },
+      "required": [
+        "prompt",
+        "messageToUser"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

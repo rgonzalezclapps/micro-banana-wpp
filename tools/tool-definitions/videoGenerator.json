@@ -1,0 +1,41 @@
+{
+  "name": "videoGenerator",
+  "description": "Genera videos profesionales usando Google Vertex AI Veo 3.0 a partir de texto y una imagen de referencia.",
+  "strict": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "minLength": 20,
+        "maxLength": 1000,
+        "description": "Descripción detallada del video a generar..."
+      },
+      "imageFileId": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{32}$",
+        "description": "ID del archivo de imagen del sistema de storage..."
+      },
+      "modelSelected": {
+        "type": "integer",
+        "description": "Selecciona la versión del modelo a utilizar: 2 para Veo 2.0 (o s se pide 9:16 de formato) o 3 para Veo 3.0 (no soporta 9:16).",
+        "enum": [
+          2,
+          3
+        ],
+        "default": 2
+      },
+      "messageToUser": {
+        "type": "string",
+        "description": "Mensaje específico para VIDEO comunicando paciencia por tiempo de procesamiento... Avisar que puede tarrdar entre 1 o 2 minutos, que no respooderas mientras estas procesanddo. Que espere a que termines y le avises."
+      }
+    },
+    "required": [
+      "prompt",
+      "imageFileId",
+      "modelSelected",
+      "messageToUser"
+    ],
+    "additionalProperties": false
+  }
+}

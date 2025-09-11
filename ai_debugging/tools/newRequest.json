@@ -1,0 +1,41 @@
+{
+  "type": "function",
+  "function": {
+    "name": "newRequest",
+    "description": "EJECUTAR INMEDIATAMENTE: Crear newRequest EN CUANTO el usuario indique intención de procesar imágenes. NO pedir confirmación ANTES de crear el newRequest. Usar TODOS los `fileStorage.fileId` de mensajes recientes del usuario con storage exitoso. Si el usuario aporta múltiples imágenes, incluí TODAS las imágenes juntas en `initialImages` para lograr una composición coherente. El `systemPrompt` DEBE estar en INGLÉS y describir con criterio profesional: objetivo de negocio, tipo de toma, lente/apertura, esquema de iluminación, composición/ratio, acabado de post y negativos semánticos. No expongas nunca URLs ni IDs al usuario. DESPUÉS de newRequest, pregunta si quiere agregar más o procesar como está. Para sumar imágenes o ajustar instrucciones después, usá `updateRequest`.",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "systemPrompt": {
+          "type": "string",
+          "description": "IN ENGLISH. Prompt maestro para el modelo que oriente un resultado comercial, realista y limpio. Debe incluir: business goal (1 línea), shot type/angle, lens (mm) + aperture (f/), lighting setup (key/fill/rim/negative fill), composition y aspect ratio, color & finish (D65/clean whites/neutral grey), post (dust removal, micro-contrast, clean edges), y semantic negatives (avoid…). Heavily rely on the 'Prompts examples/tips for generating images' that's on our main system prompt"
+        },
+        "initialImages": {
+          "type": "array",
+          "description": "TODOS los `fileStorage.fileId` (32 hex) extraídos de mensajes RECIENTES del usuario (últimos 5-10 mensajes) que tienen `fileStorage.status === 'success'`. Busca en la conversación actual, identifica mensajes con media exitoso, y extrae SOLO el fileStorage.fileId. NO uses message_id ni otros IDs. Mantener vacío SOLO en casos de text-to-image. No divulgar estos IDs al usuario.",
+          "items": {
+            "type": "string",
+            "description": "fileStorage.fileId (32-char hex, p.ej. '6ed6b3dd80fa9e0dbbe5219308cee028')."
+          }
+        },
+        "requestType": {
+          "type": "string",
+          "description": "Clasificación del flujo: elegí el que mejor represente el caso (p.ej., `photo_product` para e-commerce, `image_editing` para ediciones, `image_processing` para pipeline genérico, `custom` si no encaja en los anteriores).",
+          "enum": [
+            "image_processing",
+            "photo_product",
+            "image_editing",
+            "custom"
+          ]
+        }
+      },
+      "required": [
+        "systemPrompt",
+        "initialImages",
+        "requestType"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
