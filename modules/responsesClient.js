@@ -13,7 +13,7 @@ const ToolSchema = require('../models/ToolSchema');
 const toolExecutor = require('../tools/toolExecutor');
 const debugLoader = require('../utils/debugLoader');
 const { redisClient } = require('../database');
-const { createExternalDownloadUrl } = require('../utils/fileStorageUtils');
+const { createExternalDownloadUrl, createDownloadUrl } = require('../utils/fileStorageUtils');
 const axios = require('axios'); // Added axios for robust image downloading
 
 class ResponsesClient {
@@ -346,7 +346,7 @@ class ResponsesClient {
      */
     async loadImageAsBase64(fileId, conversationId) {
         try {
-            const downloadUrl = createExternalDownloadUrl(fileId);
+            const downloadUrl = createDownloadUrl(fileId);
             console.log(`📥 [${conversationId}] Downloading image to send as base64: ${downloadUrl}`);
 
             const response = await axios({
