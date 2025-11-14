@@ -9,8 +9,6 @@ console.log("Hora actual del servidor:", new Date().toLocaleString());
 const express = require("express");
 const cors = require("cors");
 const {
-  sequelize,
-  testConnection,
   connectMongoDB,
   connectRedis,
   DatabaseManager
@@ -24,11 +22,17 @@ const Conversation = require("./models/Conversation"); // Still needed for datab
 // Removed cron dependency - no scheduled tasks needed
 // Removed mailing service - pure API chatbot
 
-// Website generation worker for long-duration Redis queue processing
-const { websiteGeneratorWorker } = require("./services/webGeneratorWorker");
+// ============================================================================
+// DISABLED WORKERS - Image-Only Agent (PCTMv1.5.2-7)
+// ============================================================================
+// Website generation and video processing features were removed from agent prompt
+// These workers are commented out to save resources since they're no longer used
 
-// Video polling worker for short-duration video job processing
-const { videoPollingWorker } = require("./services/videoPollingWorker");
+// // Website generation worker for long-duration Redis queue processing
+// const { websiteGeneratorWorker } = require("./services/webGeneratorWorker");
+
+// // Video polling worker for short-duration video job processing
+// const { videoPollingWorker } = require("./services/videoPollingWorker");
 
 const PORT = process.env.PORT || 5001;
 
@@ -93,30 +97,39 @@ const startServer = async () => {
     // 🏗️ PROFESSIONAL APPROACH: Use centralized database manager
     const connectionResults = await DatabaseManager.initializeAll();
     
-    if (!connectionResults.postgresql || !connectionResults.mongodb || !connectionResults.redis) {
-      console.error('❌ Critical database connections failed');
+    if (!connectionResults.mongodb) {
+      console.error('❌ Critical MongoDB connection failed');
       process.exit(1);
     }
     
-    // Temporarily force recreation of website_generations table to fix ENUM syntax issues
-    await sequelize.sync({ force: false, alter: false });
-    console.log("✅ Database schema synchronized");
+    if (!connectionResults.redis) {
+      console.warn('⚠️  Redis connection failed - continuing without Redis');
+    }
+    
+    // MongoDB schema is managed through Mongoose models (no sync needed)
+    console.log("✅ MongoDB schema loaded through Mongoose models");
 
     // No admin user needed for pure API chatbot
 
-    // Start website generation worker for long-duration Redis queue processing
-    console.log("🔄 Starting website generation worker...");
-    websiteGeneratorWorker.start().catch(error => {
-      console.error("❌ Website generation worker failed to start:", error.message);
-      // Non-blocking: Server can still run without worker
-    });
+    // ========================================================================
+    // DISABLED: Website & Video Workers (PCTMv1.5.2-7)
+    // ========================================================================
+    // These workers are disabled because video and website features were
+    // removed from the agent. Uncomment if features are re-enabled.
+    
+    // // Start website generation worker for long-duration Redis queue processing
+    // console.log("🔄 Starting website generation worker...");
+    // websiteGeneratorWorker.start().catch(error => {
+    //   console.error("❌ Website generation worker failed to start:", error.message);
+    //   // Non-blocking: Server can still run without worker
+    // });
 
-    // Start video polling worker for short-duration video job processing  
-    console.log("🎬 Starting video polling worker...");
-    videoPollingWorker.start().catch(error => {
-      console.error("❌ Video polling worker failed to start:", error.message);
-      // Non-blocking: Server can still run without video worker
-    });
+    // // Start video polling worker for short-duration video job processing  
+    // console.log("🎬 Starting video polling worker...");
+    // videoPollingWorker.start().catch(error => {
+    //   console.error("❌ Video polling worker failed to start:", error.message);
+    //   // Non-blocking: Server can still run without video worker
+    // });
 
     // Start the pure API server
     app.listen(PORT, () => {
@@ -139,19 +152,21 @@ process.on("unhandledRejection", (reason, promise) => {
 // Graceful shutdown handling for both workers
 process.on('SIGINT', async () => {
   console.log('🛑 SIGINT received, shutting down gracefully...');
-  await Promise.all([
-    websiteGeneratorWorker.stop(),
-    videoPollingWorker.stop()
-  ]);
+  // DISABLED: Website & Video workers (PCTMv1.5.2-7)
+  // await Promise.all([
+  //   websiteGeneratorWorker.stop(),
+  //   videoPollingWorker.stop()
+  // ]);
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.log('🛑 SIGTERM received, shutting down gracefully...');
-  await Promise.all([
-    websiteGeneratorWorker.stop(),
-    videoPollingWorker.stop()
-  ]);
+  // DISABLED: Website & Video workers (PCTMv1.5.2-7)
+  // await Promise.all([
+  //   websiteGeneratorWorker.stop(),
+  //   videoPollingWorker.stop()
+  // ]);
   process.exit(0);
 });
 

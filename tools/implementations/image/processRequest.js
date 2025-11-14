@@ -59,8 +59,15 @@ class ProcessRequestTool extends ToolBase {
     }
 
     async sendImmediateMessageToUser(conversationId, messageText) {
-        // TODO: Implement immediate messaging - for now just log
-        console.log(`💬 [${conversationId}] Immediate message: ${messageText}`);
+        try {
+            const ResponsesClient = require('../../../modules/responsesClient');
+            const responsesClient = new ResponsesClient();
+            await responsesClient.sendImmediateMessageToUser(conversationId, messageText);
+            console.log(`✅ Immediate message sent to user: ${messageText.substring(0, 100)}${messageText.length > 100 ? '...' : ''}`);
+        } catch (error) {
+            console.error(`❌ Failed to send immediate message:`, error.message);
+            // Non-blocking - continue processing
+        }
     }
 }
 

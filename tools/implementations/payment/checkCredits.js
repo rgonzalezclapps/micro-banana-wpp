@@ -53,15 +53,15 @@ class CheckCreditsTool extends ToolBase {
             throw new Error('Conversation not found');
         }
 
-        const ParticipantProfile = require('../../../models/ParticipantProfile');
-        const participant = await ParticipantProfile.findByParticipantId(conversation.participantId);
+        const Participant = require('../../../models/Participant');
+        const participant = await Participant.findById(conversation.participantId);
         if (!participant) {
             throw new Error('Participant not found');
         }
 
         // Return credit balance information
         return {
-            participant_id: participant.id,
+            participant_id: participant._id.toString(),
             name: participant.name,
             phone_number: participant.phoneNumber,
             credit_balance: participant.creditBalance || 0,

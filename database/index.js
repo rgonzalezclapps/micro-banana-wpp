@@ -1,68 +1,26 @@
 /**
  * database/index.js
  * 
- * Description: Professional centralized database connection manager with proper separation of concerns
+ * Description: Centralized database connection manager (MongoDB + Redis only)
  * 
  * Role in the system: Single source of truth for all database connections with connection pooling and error handling
  * 
- * Node.js Context: Database - Centralized connection management for PostgreSQL, MongoDB, and Redis
+ * Node.js Context: Database - Centralized connection management for MongoDB and Redis
  * 
  * Dependencies:
- * - sequelize (PostgreSQL ORM)
  * - mongoose (MongoDB ODM)  
  * - redis (Redis client)
  * - dotenv (Environment variable loading)
  * 
  * Dependants:
  * - server.js (application startup)
- * - models/index.js (model definitions)
  * - All modules requiring database access
  */
 
 require('dotenv').config();
 
-const { Sequelize } = require('sequelize');
 const mongoose = require('mongoose');
 const redis = require('redis');
-
-// ============================================================================
-// PostgreSQL Configuration & Connection
-// ============================================================================
-
-const postgresConfig = {
-  uri: process.env.POSTGRES_URI,
-  ssl: process.env.POSTGRES_SSL === 'true'
-};
-
-const sequelize = new Sequelize(postgresConfig.uri, {
-  dialect: 'postgres',
-  dialectOptions: postgresConfig.ssl ? {
-    ssl: {
-      require: true,
-      rejectUnauthorized: false,
-    },
-  } : undefined,
-  // Professional connection pooling
-  pool: {
-    max: 10,
-    min: 0,
-    acquire: 30000,
-    idle: 10000
-  },
-  // Reduce logging noise in production
-  logging: process.env.NODE_ENV === 'development' ? console.log : false
-});
-
-async function testPostgreSQLConnection() {
-  try {
-    await sequelize.authenticate();
-    console.log('✅ PostgreSQL connection established successfully');
-    return true;
-  } catch (error) {
-    console.error('❌ PostgreSQL connection failed:', error.message);
-    return false;
-  }
-}
 
 // ============================================================================
 // MongoDB Configuration & Connection  
@@ -131,18 +89,16 @@ async function connectRedis() {
 
 class DatabaseManager {
   static async initializeAll() {
-    console.log('🔄 Initializing all database connections...');
+    console.log('🔄 Initializing database connections (MongoDB + Redis)...');
     
     const results = await Promise.allSettled([
-      testPostgreSQLConnection(),
       connectMongoDB(),
       connectRedis()
     ]);
     
-    const [postgres, mongodb, redis] = results;
+    const [mongodb, redis] = results;
     
     const summary = {
-      postgresql: postgres.status === 'fulfilled' && postgres.value,
       mongodb: mongodb.status === 'fulfilled' && mongodb.value,
       redis: redis.status === 'fulfilled' && redis.value
     };
@@ -163,27 +119,44 @@ class DatabaseManager {
     console.log('🔌 Closing all database connections...');
     
     await Promise.allSettled([
-      sequelize.close(),
       mongoose.connection.close(),
       redisClient.quit()
     ]);
     
     console.log('✅ All database connections closed');
   }
+  
+  static async healthCheck() {
+    try {
+      const mongoStatus = mongoose.connection.readyState === 1;
+      const redisStatus = redisClient.isOpen;
+      
+      return {
+        mongodb: mongoStatus ? 'connected' : 'disconnected',
+        redis: redisStatus ? 'connected' : 'disconnected',
+        healthy: mongoStatus && redisStatus
+      };
+    } catch (error) {
+      return {
+        mongodb: 'error',
+        redis: 'error',
+        healthy: false,
+        error: error.message
+      };
+    }
+  }
 }
 
 // ============================================================================
-// Professional Exports
+// Exports
 // ============================================================================
 
 module.exports = {
   // Database instances
-  sequelize,
   mongoose,
   redisClient,
   
-  // Connection functions (legacy compatibility)
-  testConnection: testPostgreSQLConnection,
+  // Connection functions
   connectMongoDB,
   connectRedis,
   

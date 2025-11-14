@@ -558,7 +558,7 @@ class VideoPollingWorker {
                 throw new Error(`Conversation not found: ${conversationId}`);
             }
             
-            const agent = await Agent.findByPk(conversation.agentId);
+            const agent = await Agent.findById(conversation.agentId);
             if (!agent) {
                 throw new Error(`Agent not found: ${conversation.agentId}`);
             }
@@ -687,7 +687,7 @@ class VideoPollingWorker {
                 throw new Error(`Conversation not found: ${conversationId}`);
             }
             
-            const agent = await Agent.findByPk(conversation.agentId);
+            const agent = await Agent.findById(conversation.agentId);
             if (!agent) {
                 throw new Error(`Agent not found: ${conversation.agentId}`);
             }

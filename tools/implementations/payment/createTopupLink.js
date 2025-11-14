@@ -5,8 +5,9 @@
  */
 
 const ToolBase = require('../toolBase');
-const db = require('../../../models'); // Import centralized models
-const { Conversation, ParticipantProfile, Payment } = db; // Destructure MongoDB models
+const Conversation = require('../../../models/Conversation');
+const Participant = require('../../../models/Participant');
+const Payment = require('../../../models/Payment');
 
 class CreateTopupLinkTool extends ToolBase {
     constructor() {
@@ -57,7 +58,7 @@ class CreateTopupLinkTool extends ToolBase {
                 throw new Error('Conversation not found');
             }
             
-            const participant = await ParticipantProfile.findByParticipantId(conversation.participantId);
+            const participant = await Participant.findById(conversation.participantId);
             if (!participant) {
                 throw new Error('Participant not found');
             }
@@ -79,7 +80,7 @@ class CreateTopupLinkTool extends ToolBase {
             
             // Create payment record in MongoDB
             const payment = new Payment({
-                participantId: participant.participantId,
+                participantId: participant._id,
                 amount: amount_ars,
                 credits: credits,
                 note: note || `Recarga de ${credits} créditos`,
@@ -90,7 +91,7 @@ class CreateTopupLinkTool extends ToolBase {
             
             console.log(`💾 Payment created in MongoDB:`, {
                 paymentId: payment._id,
-                participantId: participant.participantId,
+                participantId: participant._id.toString(),
                 amount: payment.amount,
                 credits: payment.credits
             });
@@ -101,7 +102,7 @@ class CreateTopupLinkTool extends ToolBase {
                 credits: credits,
                 note: note,
                 idempotencyKey: idempotencyKey,
-                participantId: participant.participantId
+                participantId: participant._id
             });
             
             if (topupResult.error) {

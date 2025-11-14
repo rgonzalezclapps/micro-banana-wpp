@@ -1,200 +1,66 @@
-// models/Conversation.js
+/**
+ * models/Conversation.js
+ * 
+ * Description: MongoDB model for conversation metadata (messages now in separate collection)
+ * 
+ * Role in the system: Tracks conversation state, participants, and metadata
+ * 
+ * Node.js Context: Model - MongoDB schema for conversation management
+ * 
+ * Dependencies:
+ * - mongoose (ODM for MongoDB operations)
+ * - Message model (for virtual populate)
+ * - Agent model (for references)
+ * - Participant model (for references)
+ * 
+ * Dependants:
+ * - modules/conversationManager.js (conversation creation and retrieval)
+ * - modules/messageQueue.js (conversation updates)
+ * - routes/webhookRoutes.js (conversation lookup)
+ */
 
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-const MessageChunkSchema = new Schema({
-  order: Number,
-  content: String
-});
-
-// OpenAI Tool Call Context Sub-schemas for perfect structure
-const ToolCallSchema = new Schema({
-  id: String,           // OpenAI tool call ID (e.g., "call_abc123")
-  type: String,         // "function"
-  function: {
-    name: String,       // Tool function name  
-    arguments: String   // JSON string of arguments
-  }
-}, { _id: false });
-
-const ToolResultSchema = new Schema({
-  tool_call_id: String,           // Matches tool_calls[].id
-  role: { type: String, default: 'tool' },  // OpenAI role
-  content: String                 // Tool execution result (JSON string)
-}, { _id: false });
-
-const ExecutionMetadataSchema = new Schema({
-  timestamp: { type: Date, default: Date.now },
-  total_tools: Number,
-  success_count: Number,
-  error_count: Number,
-  processing_time_ms: Number
-}, { _id: false });
-
-const MessageSchema = new Schema({
-  sender: {
-    type: String,
-    enum: ['ai_agent', 'bot_agent', 'user', 'agent', 'specialist', 'system_trigger'],
-    required: true
-  },
-  type: {
-    type: String,
-    enum: [
-      // Original types
-      'chat', 'text', 'buttons', 'button-click', 'audio', 'ptt', 'image', 'file',
-      // WhatsApp Factory message types
-      'video', 'document', 'sticker', 'location', 'contacts', 'interactive', 'reaction',
-      // Business and system types
-      'system', 'order', 'template', 'hsm', 'edited', 'deleted'
-    ],
-    required: false
-  },
-  msg_foreign_id: {
-    type: String,
-    required: false
-  },
-  msg_source: {
-    type: String,
-    enum: ['botmaker', 'ultramsg', 'whatsapp-factory'],
-    required: false
-  },
-  content: [MessageChunkSchema],
-  audioTranscription: {
-    text: [MessageChunkSchema],
-    status: { 
-      type: String, 
-      enum: ['pending', 'processing', 'completed', 'failed']
-    },
-    status_reason: {
-      type: String,
-      required: function() {
-        return this.status === 'failed';
-      }
-    }
-  },
-  timestamp: {
-    type: Date,
-    required: true
-  },
-  status: {
-    type: String,
-    enum: ['pending', 'sent', 'delivered', 'read', 'received', 'ultraMsg'],
-    default: 'pending'
-  },
-  ultraMsgData: {
-    type: mongoose.Schema.Types.Mixed,
-    required: false  
-  },
-  // New fields for AI response
-  thinking: String,
-  aiSystemMessage: {
-    type: String,
-    get: function(data) {
-      try {
-        return JSON.parse(data);
-      } catch (error) {
-        return data;
-      }
-    },
-    set: function(data) {
-      return JSON.stringify(data);
-    }
-  },
-  // OpenAI Responses API - Complete tool call context storage
-  openaiToolContext: {
-    // Exact OpenAI tool_calls format from assistant response
-    tool_calls: [ToolCallSchema],
-    // Exact OpenAI tool results format for context reconstruction  
-    tool_results: [ToolResultSchema],
-    // Metadata for debugging and audit
-    execution_metadata: ExecutionMetadataSchema
-  },
-  recipient: {
-    type: String,
-    enum: ['user', 'operator', 'specialist', 'system'],
-    default: 'user'
-  },
-  // File storage result for media messages
-  fileStorage: {
-    status: {
-      type: String,
-      enum: ['pending', 'success', 'error', 'not_applicable'],
-      default: 'not_applicable'
-    },
-    fileId: {
-      type: String,
-      required: false // Crypto-secure file ID from our storage server
-    },
-    filename: {
-      type: String,
-      required: false // Generated secure filename
-    },
-    originalFilename: {
-      type: String,
-      required: false // Original filename if available
-    },
-    fileSize: {
-      type: Number,
-      required: false // File size in bytes
-    },
-    fileSizeHuman: {
-      type: String,
-      required: false // Human-readable file size
-    },
-    contentType: {
-      type: String,
-      required: false // MIME type
-    },
-    downloadUrl: {
-      type: String,
-      required: false // URL to access file from our storage
-    },
-    uploadDate: {
-      type: Date,
-      required: false // When file was successfully stored
-    },
-    errorCode: {
-      type: String,
-      required: false // Error code if storage failed
-    },
-    errorMessage: {
-      type: String,
-      required: false // Error message if storage failed
-    },
-    requestId: {
-      type: String,
-      required: false // Request tracking ID
-    }
-  }
-});
-
-// Remove any existing indexes on the messages or content fields
-MessageSchema.index({ content: 1 }, { background: true, sparse: true });
+// Note: MessageSchema has been moved to models/Message.js
+// Messages are now stored in a separate collection for scalability
 
 const ConversationSchema = new Schema({
+  // === References (UPDATED to ObjectId) ===
   participantId: {
-    type: Number,
-    required: true
+    type: Schema.Types.ObjectId,
+    ref: 'Participant',
+    required: true,
+    index: true
   },
   phoneNumber: {
     type: String,
-    required: true
+    required: true,
+    index: true
   },
   participantName: {
     type: String,
     default: 'Unknown'
   },
   agentId: {
-    type: Schema.Types.Mixed,
+    type: Schema.Types.ObjectId,
+    ref: 'Agent',
     required: true,
-    ref: 'Agent'
+    index: true
   },
   agentName: {
     type: String,
-    required: false // Made optional to prevent validation errors
+    required: false
   },
-  messages: [MessageSchema],
+  
+  // === Messages Array REMOVED - now in separate Message collection ===
+  // messages: [MessageSchema],  // DELETED
+  
+  // === Message Metadata (NEW) ===
+  messageCount: {
+    type: Number,
+    default: 0
+  },
   unreadCount: {
     type: Number,
     default: 0
@@ -211,7 +77,7 @@ const ConversationSchema = new Schema({
     role: {
       type: String,
       enum: ['ai_agent', 'bot_agent', 'user', 'agent', 'specialist', 'system_trigger'],
-      required: false // Made optional to prevent validation errors
+      required: false
     },
     name: {
       type: String,
@@ -230,12 +96,37 @@ const ConversationSchema = new Schema({
     enum: ['active', 'inactive'],
     default: 'active'
   }
-  // clientId removed - no longer needed in clientless architecture
 }, {
   timestamps: true
 });
 
-// Add this line to create a virtual populate for the agent
+// ============================================================================
+// Indexes for Performance
+// ============================================================================
+
+// Unique conversation per participant-agent pair
+ConversationSchema.index({ participantId: 1, agentId: 1 }, { unique: true });
+
+// Phone number lookup
+ConversationSchema.index({ phoneNumber: 1 });
+
+// Recent conversations
+ConversationSchema.index({ lastMessageTime: -1 });
+
+// Status filtering
+ConversationSchema.index({ status: 1 });
+
+// ⭐ NEW: Agent-based queries (for analytics and filtering)
+ConversationSchema.index({ agentId: 1, status: 1 });
+
+// ⭐ NEW: Phone + agent lookup (for multi-agent scenarios)
+ConversationSchema.index({ phoneNumber: 1, agentId: 1 });
+
+// ============================================================================
+// Virtual Properties
+// ============================================================================
+
+// Virtual populate for agent
 ConversationSchema.virtual('agent', {
   ref: 'Agent',
   localField: 'agentId',
@@ -243,9 +134,85 @@ ConversationSchema.virtual('agent', {
   justOne: true
 });
 
+// Virtual populate for participant
+ConversationSchema.virtual('participant', {
+  ref: 'Participant',
+  localField: 'participantId',
+  foreignField: '_id',
+  justOne: true
+});
+
+// Virtual populate for messages (from Message collection)
+ConversationSchema.virtual('messages', {
+  ref: 'Message',
+  localField: '_id',
+  foreignField: 'conversationId'
+});
+
+// Legacy compatibility: map _id to id
+ConversationSchema.virtual('id').get(function() {
+  return this._id.toString();
+});
+
 // Ensure virtuals are included when converting to JSON
 ConversationSchema.set('toJSON', { virtuals: true });
 ConversationSchema.set('toObject', { virtuals: true });
+
+// ============================================================================
+// Instance Methods
+// ============================================================================
+
+/**
+ * Increment message count
+ */
+ConversationSchema.methods.incrementMessageCount = async function() {
+  this.messageCount += 1;
+  return await this.save();
+};
+
+/**
+ * Reset unread count
+ */
+ConversationSchema.methods.resetUnreadCount = async function() {
+  this.unreadCount = 0;
+  return await this.save();
+};
+
+// ============================================================================
+// Static Methods
+// ============================================================================
+
+/**
+ * Find conversation by participant and agent
+ * @param {ObjectId} participantId - Participant ID
+ * @param {ObjectId} agentId - Agent ID
+ * @returns {Promise<Object>} Conversation document
+ */
+ConversationSchema.statics.findByParticipantAndAgent = async function(participantId, agentId) {
+  return await this.findOne({ participantId, agentId });
+};
+
+/**
+ * Find conversations by participant
+ * @param {ObjectId} participantId - Participant ID
+ * @returns {Promise<Array>} Array of conversations
+ */
+ConversationSchema.statics.findByParticipant = async function(participantId) {
+  return await this.find({ participantId }).sort({ lastMessageTime: -1 });
+};
+
+/**
+ * Find conversations by agent
+ * @param {ObjectId} agentId - Agent ID
+ * @returns {Promise<Array>} Array of conversations
+ */
+ConversationSchema.statics.findByAgent = async function(agentId) {
+  return await this.find({ agentId }).sort({ lastMessageTime: -1 });
+};
+
+// ============================================================================
+// Export Model
+// ============================================================================
 
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 

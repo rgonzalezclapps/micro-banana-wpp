@@ -316,9 +316,9 @@ class MercadoPagoService {
         return { success: false, reason: 'payment_not_found' };
       }
 
-      // Find our internal payment record
+      // Find our internal payment record (MongoDB syntax)
       const payment = await Payment.findOne({
-        where: { externalReference: paymentInfo.external_reference }
+        externalReference: paymentInfo.external_reference
       });
 
       if (!payment) {
@@ -344,8 +344,8 @@ class MercadoPagoService {
         });
 
         // Credit participant balance
-        const ParticipantProfile = require('../models/ParticipantProfile');
-        const participant = await ParticipantProfile.findByParticipantId(payment.participantId);
+        const Participant = require('../models/Participant');
+        const participant = await Participant.findById(payment.participantId);
         if (participant) {
           await participant.updateCredits(payment.credits, 'add');
           await payment.markAsCredited();
@@ -371,10 +371,18 @@ class MercadoPagoService {
         console.log('❌ Payment rejected/cancelled');
         await payment.markAsRejected(paymentInfo.status_detail || 'Payment not approved');
         
+        // Get participant for notification
+        const Participant = require('../models/Participant');
+        const participant = await Participant.findById(payment.participantId);
+        
         updateResult = {
           success: true,
           action: 'rejected',
-          reason: paymentInfo.status_detail
+          participantId: participant?._id,
+          phoneNumber: participant?.phoneNumber,
+          reason: paymentInfo.status_detail || paymentInfo.status,
+          amount: payment.amount,
+          credits: payment.credits
         };
       }
 

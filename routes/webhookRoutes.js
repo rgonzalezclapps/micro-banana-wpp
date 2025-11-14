@@ -1,12 +1,30 @@
-// routes/webhookRoutes.js
+/**
+ * routes/webhookRoutes.js
+ * 
+ * Description: Unified webhook handling with MongoDB Agent queries
+ * 
+ * Role in the system: Entry point for all external platform webhooks (WhatsApp, MercadoPago, etc.)
+ * 
+ * Node.js Context: Route - webhook processing with provider detection and authentication
+ * 
+ * Dependencies:
+ * - express
+ * - database/index.js (Redis client)
+ * - models/Agent (MongoDB)
+ * - models/Conversation (MongoDB)
+ * - modules/* (message processing and queue)
+ * 
+ * Dependants:
+ * - External platforms (WhatsApp, UltraMsg, Botmaker, MercadoPago, WhatsApp Factory)
+ */
+
 const express = require('express');
 const router = express.Router();
-const { redisClient } = require('../database'); // Import Redis client
-const { Agent } = require('../models');
+const { redisClient } = require('../database');
+const Agent = require('../models/Agent');
 const Conversation = require('../models/Conversation');
 const openAIIntegration = require('../modules/openaiIntegration');
 const { sendUltraMsg, clearUltraMsgQueue } = require('../services/ultramsgService');
-const { Op } = require('sequelize');
 const mongoose = require('mongoose');
 const { processMessage } = require('../modules/messageProcessor');
 const { 
@@ -39,6 +57,16 @@ router.post('/', async (req, res) => {
     const provider = detectProvider(req);
     console.log(`🔍 [${requestId}] Provider detected: ${provider}`);
 
+    // 🔧 CRITICAL: Extract MercadoPago dataId ONCE for entire request scope
+    let mpDataId = null;
+    if (provider === 'mercadopago') {
+      mpDataId = req.query['data.id'] ||  // Query param: ?data.id=123456 (payment webhooks)
+                 req.body?.data?.id ||     // Body: {"data": {"id": "123456"}} (payment webhooks)
+                 req.query.id ||           // Query param: ?id=33652629180 (Feed v2.0 + merchant_order)
+                 req.body?.id ||           // Body: {"id": "123456"} (alternative format)
+                 req.params?.id;           // URL param fallback
+    }
+
     // 🔒 STEP 2: Apply provider-specific authentication
     if (provider === 'mercadopago') {
       console.log(`🔐 [${requestId}] Applying MercadoPago X-Signature authentication...`);
@@ -47,17 +75,10 @@ router.post('/', async (req, res) => {
       const signature = req.headers['x-signature'];
       const xRequestId = req.headers['x-request-id'];
       
-      // Extract data.id from multiple possible locations (per MP documentation)
-      const dataId = req.query['data.id'] ||  // Query param: ?data.id=123456 (payment webhooks)
-                     req.body?.data?.id ||     // Body: {"data": {"id": "123456"}} (payment webhooks)
-                     req.query.id ||           // Query param: ?id=33652629180 (merchant_order webhooks)
-                     req.body?.id ||           // Body: {"id": "123456"} (alternative format)
-                     req.params?.id;           // URL param fallback
-      
       console.log(`🔍 [${requestId}] MercadoPago auth - Headers: {
         hasSignature: ${!!signature},
         hasRequestId: ${!!xRequestId},
-        dataId: ${dataId || 'NOT_FOUND'},
+        dataId: ${mpDataId || 'NOT_FOUND'},
         queryDataId: ${req.query['data.id'] || 'NOT_FOUND'},
         bodyDataId: ${req.body?.data?.id || 'NOT_FOUND'},
         queryId: ${req.query.id || 'NOT_FOUND'},
@@ -67,7 +88,7 @@ router.post('/', async (req, res) => {
       }`);
       
       // 🔍 DEEP TRACE: Log complete request details for failed webhooks
-      if (!dataId) {
+      if (!mpDataId) {
         console.log(`🔍 [${requestId}] DEEP TRACE - Complete request analysis:`);
         console.log(`   📄 Query params:`, JSON.stringify(req.query, null, 2));
         console.log(`   📄 Body content:`, JSON.stringify(req.body, null, 2));
@@ -93,23 +114,23 @@ router.post('/', async (req, res) => {
       }
       
       // 🔧 ARCHITECTURAL FIX: Handle different webhook types  
-      const webhookType = req.body?.type || req.body?.topic || req.query?.topic;
+      const webhookType = req.body?.type || req.body?.topic || req.query?.topic || 'payment'; // Default to payment for Feed webhooks
       
       // 🔧 STRATEGIC FIX: Handle merchant_order webhooks separately  
       if (webhookType === 'merchant_order') {
         console.log(`ℹ️ [${requestId}] merchant_order webhook - acknowledged without strict processing`);
-        console.log(`📄 [${requestId}] merchant_order details: id=${req.query.id || dataId}, resource=${req.body?.resource}`);
+        console.log(`📄 [${requestId}] merchant_order details: id=${req.query.id || mpDataId}, resource=${req.body?.resource}`);
         
         // merchant_order webhooks are informational - acknowledge but don't process credits
         return res.status(200).json({ 
           message: 'merchant_order webhook acknowledged',
           type: 'merchant_order',
-          id: req.query.id || dataId,
+          id: req.query.id || mpDataId,
           note: 'merchant_order notifications are informational and do not trigger credit processing'
         });
       }
       
-      if (!dataId) {
+      if (!mpDataId) {
         console.warn(`🚫 [${requestId}] Authentication failed for mercadopago: missing_data_id for ${webhookType || 'unknown'} webhook`);
         return res.status(401).json({ 
           error: 'MERCADOPAGO_AUTH_FAILED',
@@ -118,7 +139,7 @@ router.post('/', async (req, res) => {
       }
 
       // MercadoPago signature validation will be done in the MP handler
-      console.log(`✅ [${requestId}] MercadoPago authentication elements validated`);
+      console.log(`✅ [${requestId}] MercadoPago authentication elements validated for ${webhookType} webhook`);
       
     } else {
       console.log(`🔐 [${requestId}] Applying standard API Key authentication for provider: ${provider}`);
@@ -156,17 +177,19 @@ router.post('/', async (req, res) => {
       const mercadopagoService = require('../services/mercadopagoService');
       const ultramsgService = require('../services/ultramsgService');
       
-      // Extraer headers necesarios para validación (already extracted in auth section)
+      // Use dataId already extracted in auth section (lines 69-73)
+      // No need to re-extract - prevents Feed v2.0 bug
       const signature = req.headers['x-signature'];
       const xRequestId = req.headers['x-request-id'];
-      const dataId = req.query['data.id'] || req.body?.data?.id;
+      // dataId already available from auth section
       
       console.log(`🔐 [${requestId}] MercadoPago webhook details:`, {
         type: req.body.type,
         action: req.body.action,
         dataIdFromQuery: req.query['data.id'],
         dataIdFromBody: req.body.data?.id,
-        finalDataId: dataId,
+        dataIdFromQueryId: req.query.id,  // Feed v2.0 uses this
+        finalDataId: mpDataId,  // Reusing extracted value from auth section
         liveMode: req.body.live_mode,
         userId: req.body.user_id,
         hasSignature: !!signature,
@@ -175,44 +198,65 @@ router.post('/', async (req, res) => {
       });
       
       // Procesar notificación de MercadoPago con signature validation
+      // For Feed v2.0 webhooks, augment empty body with type
+      const webhookPayload = req.body && Object.keys(req.body).length > 0 
+        ? req.body 
+        : { type: webhookType, id: mpDataId }; // Minimal payload for Feed webhooks
+      
       const result = await mercadopagoService.processWebhookNotification(
-        req.body,
+        webhookPayload,
         signature,
         xRequestId,
-        dataId  // Pass the correctly extracted dataId
+        mpDataId  // Use the dataId from auth section (includes req.query.id)
       );
       
       console.log(`📊 [${requestId}] MercadoPago processing result:`, result);
       
-      // Enviar mensaje de confirmación si el pago fue acreditado
-      if (result.success && result.action === 'credited') {
+      // Enviar mensaje de confirmación o rechazo
+      if (result.success && (result.action === 'credited' || result.action === 'rejected')) {
         try {
           console.log(`📨 [${requestId}] Sending payment confirmation message...`);
           
-          // Buscar agent activo para este participant
-          const { Agent, ParticipantAgentAssociation } = require('../models');
+          // Find active agent for this participant using MongoDB
+          const Participant = require('../models/Participant');
+          const participant = await Participant.findById(result.participantId);
           
-          const association = await ParticipantAgentAssociation.findOne({
-            where: { participantId: result.participantId },
-            include: [{
-              model: Agent,
-              as: 'agent',
-              where: { status: 'Active' }
-            }]
-          });
-          
-          if (association && association.agent) {
-            const confirmationMessage = `✅ ¡Pago confirmado!\n\nHemos registrado tu pago por $${result.amount} ARS y acreditado ${result.creditsAdded} créditos a tu cuenta.\n\n💰 Saldo actual: ${result.newBalance} créditos`;
+          if (participant) {
+            // Find conversation with active agent
+            const conversation = await Conversation.findOne({
+              participantId: result.participantId
+            }).sort({ lastMessageTime: -1 });
             
-            await ultramsgService.sendUltraMsg(
-              association.agent,
-              result.phoneNumber,
-              confirmationMessage
-            );
-            
-            console.log(`✅ [${requestId}] Payment confirmation sent successfully`);
+            if (conversation) {
+              const agent = await Agent.findOne({
+                _id: conversation.agentId,
+                $or: [{ status: 'active' }, { status: 'Active' }]
+              });
+              
+              if (agent) {
+                let notificationMessage;
+                
+                if (result.action === 'credited') {
+                  notificationMessage = `✅ ¡Pago confirmado!\n\nHemos registrado tu pago por $${result.amount} ARS y acreditado ${result.creditsAdded} créditos a tu cuenta.\n\n💰 Saldo actual: ${result.newBalance} créditos`;
+                } else if (result.action === 'rejected') {
+                  notificationMessage = `❌ Pago rechazado\n\nTu intento de pago por $${result.amount} ARS no fue aprobado.\n\nMotivo: ${result.reason || 'No especificado'}\n\nPodés intentar nuevamente cuando quieras. Si tenés dudas, preguntame.`;
+                }
+                
+                await ultramsgService.sendUltraMsg(
+                  agent,
+                  result.phoneNumber,
+                  notificationMessage
+                );
+                
+                console.log(`✅ [${requestId}] Payment ${result.action} notification sent successfully`);
+              } else {
+                console.warn(`⚠️ [${requestId}] No active agent found for conversation`);
+              }
+            } else {
+              console.warn(`⚠️ [${requestId}] No conversation found for participant ${result.participantId}`);
+            }
           } else {
-            console.warn(`⚠️ [${requestId}] No active agent found for participant ${result.participantId}`);
+            console.warn(`⚠️ [${requestId}] Participant ${result.participantId} not found`);
           }
           
         } catch (messageError) {
@@ -304,7 +348,7 @@ async function processWebhookAsync(requestId, webhookStart, provider, normalized
   try {
     console.log(`🔄 [${requestId}] Starting async processing...`);
     
-    // Buscar agente basado en instanceId y proveedor
+    // Buscar agente basado en instanceId y proveedor (MongoDB)
     let agent = null;
     
     // Estrategia de búsqueda específica por proveedor
@@ -313,30 +357,21 @@ async function processWebhookAsync(requestId, webhookStart, provider, normalized
       const phoneNumberId = data?.to?.split('@')[0] || instanceId;
       
       agent = await Agent.findOne({ 
-        where: { 
-          type: 'wpp-bsp',
-          instanceId: phoneNumberId,
-          deletedAt: null
-        } 
+        type: 'wpp-bsp',
+        instanceId: phoneNumberId
       });
       
       if (!agent) {
         // Fallback: buscar por instanceId original
         agent = await Agent.findOne({ 
-          where: { 
-            type: 'wpp-bsp',
-            instanceId: instanceId,
-            deletedAt: null
-          } 
+          type: 'wpp-bsp',
+          instanceId: instanceId
         });
       }
     } else {
       // Para UltraMessage, usar búsqueda original
       agent = await Agent.findOne({ 
-        where: { 
-          instanceId: instanceId,
-          deletedAt: null
-        } 
+        instanceId: instanceId
       });
     }
     
@@ -391,8 +426,25 @@ async function handleMessageReceived(agent, data, event_type, instanceId, provid
   const participant = await getOrCreateParticipant(phoneNumber, pushname);
   let conversation = await getOrCreateConversation(participant, agent);
 
+  // ====================================================================
+  // ⭐ ABORT FIRST - Before ANY processing
+  // ====================================================================
+  // If this conversation is currently processing, abort immediately
+  // This ensures we always process the most recent messages
+  
+  if (messageQueue.isProcessing(conversation._id.toString())) {
+    console.log(`🚫 [${conversation._id}] Conversation is processing - aborting to handle new message`);
+    await messageQueue.abortCurrentProcessing(conversation._id.toString(), 'new_webhook_received');
+  }
+
   // 🔥 NEW: Enhanced approach with media completion tracking
   const messageData = await processMessage(data, data.type, conversation._id.toString(), messageQueue);
+  
+  // ====================================================================
+  // ⭐ ADD ORIGINAL TIMESTAMP for chronological ordering
+  // ====================================================================
+  // This ensures messages maintain their order even with async operations
+  messageData.originalTimestamp = messageData.timestamp;
   
   // Agregar información del proveedor al messageData para tracking
   messageData.provider = provider;
@@ -401,7 +453,14 @@ async function handleMessageReceived(agent, data, event_type, instanceId, provid
   }
 
   // Update conversation data and save immediately into database
-  conversation = await updateConversationData(conversation, messageData, agent, participant);
+  // ⭐ Returns { conversation, messageMongoId }
+  const updateResult = await updateConversationData(conversation, messageData, agent, participant);
+  
+  // ====================================================================
+  // ⭐ CRITICAL: Add MongoDB _id to messageData for placeholder system
+  // ====================================================================
+  messageData._id = updateResult.messageMongoId;
+  conversation = updateResult.conversation;
 
   // 🔍 TRACE: Log messageData right before adding to queue
   console.log(`[TRACE - handleMessageReceived] messageData for queue:`, {

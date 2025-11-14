@@ -24,7 +24,7 @@ const ToolSchemaSchema = new Schema({
         required: true
     },
     enabledForAgents: [{
-        type: Number, // Array of PostgreSQL Agent IDs
+        type: Schema.Types.ObjectId,
         ref: 'Agent'
     }],
     metadata: {
@@ -61,7 +61,7 @@ ToolSchemaSchema.index({ enabledForAgents: 1, isActive: 1 });
 
 /**
  * Find all active tools enabled for a specific agent.
- * @param {number} agentId - The ID of the agent from PostgreSQL.
+ * @param {ObjectId} agentId - The Agent ObjectId
  * @returns {Promise<Array>} An array of tool definition objects.
  */
 ToolSchemaSchema.statics.findActiveToolsForAgent = async function(agentId) {

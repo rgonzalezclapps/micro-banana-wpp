@@ -1,27 +1,29 @@
 /**
- * externalApiRoutes.js
+ * routes/externalApiRoutes.js
  * 
- * Description: Simplified external API routes for conversation access by external systems
+ * Description: External API routes for conversation access with separated Message collection
  * 
- * Role in the system: Provides secure access to conversations by client, agent, participant, or conversation ID
+ * Role in the system: Provides secure access to conversations and messages for external systems
  * 
- * Node.js Context: Route - external API endpoints with API key authentication for chatbot integrations
- * 
- * Endpoints:
- * - GET /conversations/client/:clientId - All conversations for a client
- * - GET /conversations/agent/:agentId - All conversations for an agent  
- * - GET /conversations/participant/:phoneNumber - All conversations for a participant
- * - GET /conversations/:conversationId - Single conversation by ID
+ * Node.js Context: Route - external API endpoints with API key authentication
  * 
  * Dependencies:
- * - express, externalApiAuth, Conversation, Agent models
+ * - express
+ * - externalApiAuth (API key validation)
+ * - models/Conversation (conversation metadata)
+ * - models/Message (separated message storage)
+ * - models/Agent (agent lookup)
+ * 
+ * Dependants:
+ * - External integrations and monitoring systems
  */
 
 const express = require('express');
 const router = express.Router();
 const { validateExternalApiKey } = require('../externalApiAuth');
 const Conversation = require('../models/Conversation');
-const { Agent } = require('../models');
+const Message = require('../models/Message');
+const Agent = require('../models/Agent');
 
 // ============================================================================
 // External API Middleware - Apply to all external routes
@@ -43,55 +45,8 @@ router.use((req, res, next) => {
 });
 
 // ============================================================================
-// Simplified External API Endpoints - Conversation Access
+// Conversation Endpoints with Message Pagination
 // ============================================================================
-
-/**
- * GET /api/external/conversations/client/:clientId
- * Get all conversations for a specific client
- */
-router.get('/conversations/client/:clientId', async (req, res) => {
-    try {
-        const { clientId } = req.params;
-        const { includeMessages = false, limit = 100, offset = 0 } = req.query;
-
-        // Get agents for this client
-        const agents = await Agent.findAll({ 
-            where: { clientId: parseInt(clientId) },
-            attributes: ['id']
-        });
-        
-        const agentIds = agents.map(a => a.id);
-        
-        // Build query
-        const query = { agentId: { $in: agentIds } };
-        const projection = includeMessages === 'true' ? {} : { messages: 0 };
-        
-        const conversations = await Conversation.find(query, projection)
-            .sort({ lastMessageTime: -1 })
-            .limit(parseInt(limit))
-            .skip(parseInt(offset));
-
-        res.json({
-            success: true,
-            data: conversations,
-                meta: {
-                clientId: clientId,
-                    total: conversations.length,
-                limit: parseInt(limit),
-                offset: parseInt(offset)
-            }
-        });
-        
-    } catch (error) {
-        console.error('Error fetching conversations by client:', error);
-        res.status(500).json({
-            success: false,
-            error: 'INTERNAL_ERROR',
-            message: 'Failed to fetch conversations for client'
-        });
-    }
-});
 
 /**
  * GET /api/external/conversations/agent/:agentId
@@ -100,16 +55,27 @@ router.get('/conversations/client/:clientId', async (req, res) => {
 router.get('/conversations/agent/:agentId', async (req, res) => {
     try {
         const { agentId } = req.params;
-        const { includeMessages = false, limit = 100, offset = 0 } = req.query;
+        const { includeMessages = false, messageLimit = 50, messageOffset = 0, limit = 100, offset = 0 } = req.query;
 
-        // Build query
-        const query = { agentId: parseInt(agentId) };
-        const projection = includeMessages === 'true' ? {} : { messages: 0 };
-        
-        const conversations = await Conversation.find(query, projection)
+        // Query conversations by agentId (ObjectId)
+        const conversations = await Conversation.find({ agentId })
             .sort({ lastMessageTime: -1 })
             .limit(parseInt(limit))
-            .skip(parseInt(offset));
+            .skip(parseInt(offset))
+            .lean();
+
+        // Optionally include messages from Message collection
+        if (includeMessages === 'true') {
+            for (const conversation of conversations) {
+                const messages = await Message.find({ conversationId: conversation._id })
+                    .sort({ timestamp: -1 })
+                    .limit(parseInt(messageLimit))
+                    .skip(parseInt(messageOffset))
+                    .lean();
+                
+                conversation.messages = messages;
+            }
+        }
 
         res.json({
             success: true,
@@ -118,14 +84,16 @@ router.get('/conversations/agent/:agentId', async (req, res) => {
                 agentId: agentId,
                 total: conversations.length,
                 limit: parseInt(limit),
-                offset: parseInt(offset)
+                offset: parseInt(offset),
+                messagesIncluded: includeMessages === 'true',
+                messageLimit: includeMessages === 'true' ? parseInt(messageLimit) : 0
             }
         });
 
     } catch (error) {
         console.error('Error fetching conversations by agent:', error);
         res.status(500).json({
-                success: false,
+            success: false,
             error: 'INTERNAL_ERROR',
             message: 'Failed to fetch conversations for agent'
         });
@@ -139,25 +107,38 @@ router.get('/conversations/agent/:agentId', async (req, res) => {
 router.get('/conversations/participant/:phoneNumber', async (req, res) => {
     try {
         const { phoneNumber } = req.params;
-        const { includeMessages = false, limit = 100, offset = 0 } = req.query;
+        const { includeMessages = false, messageLimit = 50, messageOffset = 0, limit = 100, offset = 0 } = req.query;
 
-        // Build query
-        const query = { phoneNumber: phoneNumber };
-        const projection = includeMessages === 'true' ? {} : { messages: 0 };
-        
-        const conversations = await Conversation.find(query, projection)
+        // Query conversations by phoneNumber
+        const conversations = await Conversation.find({ phoneNumber })
             .sort({ lastMessageTime: -1 })
             .limit(parseInt(limit))
-            .skip(parseInt(offset));
+            .skip(parseInt(offset))
+            .lean();
+
+        // Optionally include messages from Message collection
+        if (includeMessages === 'true') {
+            for (const conversation of conversations) {
+                const messages = await Message.find({ conversationId: conversation._id })
+                    .sort({ timestamp: -1 })
+                    .limit(parseInt(messageLimit))
+                    .skip(parseInt(messageOffset))
+                    .lean();
+                
+                conversation.messages = messages;
+            }
+        }
 
         res.json({
             success: true,
             data: conversations,
-                meta: {
+            meta: {
                 phoneNumber: phoneNumber,
                 total: conversations.length,
                 limit: parseInt(limit),
-                offset: parseInt(offset)
+                offset: parseInt(offset),
+                messagesIncluded: includeMessages === 'true',
+                messageLimit: includeMessages === 'true' ? parseInt(messageLimit) : 0
             }
         });
         
@@ -173,17 +154,15 @@ router.get('/conversations/participant/:phoneNumber', async (req, res) => {
 
 /**
  * GET /api/external/conversations/:conversationId
- * Get a single conversation by ID
+ * Get a single conversation by ID with optional message pagination
  */
 router.get('/conversations/:conversationId', async (req, res) => {
     try {
         const { conversationId } = req.params;
-        const { includeMessages = true } = req.query;
+        const { includeMessages = true, messageLimit = 100, messageOffset = 0 } = req.query;
 
-        // Build query
-        const projection = includeMessages === 'true' ? {} : { messages: 0 };
-        
-        const conversation = await Conversation.findById(conversationId, projection);
+        // Get conversation metadata
+        const conversation = await Conversation.findById(conversationId).lean();
         
         if (!conversation) {
             return res.status(404).json({
@@ -193,9 +172,26 @@ router.get('/conversations/:conversationId', async (req, res) => {
             });
         }
 
+        // Optionally include messages from Message collection
+        if (includeMessages === 'true') {
+            const messages = await Message.find({ conversationId: conversation._id })
+                .sort({ timestamp: -1 })
+                .limit(parseInt(messageLimit))
+                .skip(parseInt(messageOffset))
+                .lean();
+            
+            conversation.messages = messages;
+        }
+
         res.json({
             success: true,
-            data: conversation
+            data: conversation,
+            meta: {
+                messagesIncluded: includeMessages === 'true',
+                messageCount: includeMessages === 'true' ? conversation.messages.length : 0,
+                messageLimit: parseInt(messageLimit),
+                messageOffset: parseInt(messageOffset)
+            }
         });
         
     } catch (error) {
@@ -204,6 +200,60 @@ router.get('/conversations/:conversationId', async (req, res) => {
             success: false,
             error: 'INTERNAL_ERROR',
             message: 'Failed to fetch conversation'
+        });
+    }
+});
+
+/**
+ * GET /api/external/conversations/:conversationId/messages
+ * Get paginated messages for a specific conversation
+ */
+router.get('/conversations/:conversationId/messages', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const { limit = 100, offset = 0, sortOrder = 'desc' } = req.query;
+
+        // Verify conversation exists
+        const conversation = await Conversation.findById(conversationId);
+        if (!conversation) {
+            return res.status(404).json({
+                success: false,
+                error: 'CONVERSATION_NOT_FOUND',
+                message: 'Conversation not found'
+            });
+        }
+
+        // Query messages with pagination
+        const sort = sortOrder === 'asc' ? { timestamp: 1 } : { timestamp: -1 };
+        const messages = await Message.find({ conversationId })
+            .sort(sort)
+            .limit(parseInt(limit))
+            .skip(parseInt(offset))
+            .lean();
+
+        // Get total message count
+        const totalCount = await Message.countDocuments({ conversationId });
+
+        res.json({
+            success: true,
+            data: messages,
+            meta: {
+                conversationId: conversationId,
+                total: totalCount,
+                returned: messages.length,
+                limit: parseInt(limit),
+                offset: parseInt(offset),
+                sortOrder: sortOrder,
+                hasMore: (parseInt(offset) + messages.length) < totalCount
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error fetching messages:', error);
+        res.status(500).json({
+            success: false,
+            error: 'INTERNAL_ERROR',
+            message: 'Failed to fetch messages'
         });
     }
 });
@@ -219,7 +269,9 @@ router.get('/conversations/:conversationId', async (req, res) => {
 router.get('/health', async (req, res) => {
     try {
         // Test database connections
-        const mongoTest = await Conversation.countDocuments({});
+        const conversationCount = await Conversation.countDocuments({});
+        const messageCount = await Message.countDocuments({});
+        const agentCount = await Agent.countDocuments({});
         
         res.json({
             success: true,
@@ -227,7 +279,9 @@ router.get('/health', async (req, res) => {
             timestamp: new Date().toISOString(),
             services: {
                 mongodb: 'connected',
-                conversations: mongoTest >= 0 ? 'available' : 'unavailable'
+                conversations: conversationCount,
+                messages: messageCount,
+                agents: agentCount
             }
         });
     } catch (error) {

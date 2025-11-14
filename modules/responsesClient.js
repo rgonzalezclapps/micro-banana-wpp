@@ -8,13 +8,15 @@
 
 const { OpenAI } = require("openai");
 const Conversation = require('../models/Conversation');
-const AgentConfig = require('../models/AgentConfig');
+const Agent = require('../models/Agent');
 const ToolSchema = require('../models/ToolSchema');
 const toolExecutor = require('../tools/toolExecutor');
 const debugLoader = require('../utils/debugLoader');
 const { redisClient } = require('../database');
+const { loadMessages: loadMessagesFromRedis, populateCache } = require('../utils/redisConversationCache'); // ⭐ Redis cache
 const { createExternalDownloadUrl, createDownloadUrl } = require('../utils/fileStorageUtils');
 const axios = require('axios'); // Added axios for robust image downloading
+const Message = require('../models/Message'); // ⭐ For MongoDB fallback
 
 class ResponsesClient {
     constructor() {
@@ -25,7 +27,7 @@ class ResponsesClient {
     /**
      * Generate AI response using Responses API with MongoDB configuration
      */
-    async generateResponse(conversationId, newMessage) {
+    async generateResponse(conversationId, newMessage, abortController = null) {
         console.log(`🤖 [${conversationId}] Starting Responses API processing`);
 
         try {
@@ -80,15 +82,48 @@ class ResponsesClient {
                 }
             }
 
-            // Create request with agent-specific configuration (streaming optional)
+            // ================================================================
+            // ⭐ MODEL CONFIGURATION - OpenAI Public API Parameters ONLY
+            // ================================================================
+            // OpenAI Public API ONLY supports: max_completion_tokens, temperature, top_p
+            // Azure-specific parameters (max_output_tokens, reasoning_effort, verbosity) NOT supported
+            
             const requestConfig = {
                 model: agentConfig.modelConfig.model,
                 messages,
-                tools: finalTools, // Use finalTools (debug or MongoDB)
-                response_format: responseFormat, // Use debug schema if enabled
+                tools: finalTools,
+                response_format: responseFormat,
                 max_completion_tokens: agentConfig.modelConfig.maxCompletionTokens,
-                stream: agentConfig.modelConfig.streaming // Respect agent's streaming preference
+                stream: agentConfig.modelConfig.streaming
             };
+            
+            // ================================================================
+            // ⭐ Add temperature ONLY for non-reasoning models
+            // ================================================================
+            const modelName = agentConfig.modelConfig.model.toLowerCase();
+            const isReasoningModel = modelName.includes('gpt-5') && !modelName.includes('mini');
+            
+            if (!isReasoningModel) {
+                // Standard models (gpt-5-mini, gpt-4o) support temperature
+                requestConfig.temperature = agentConfig.modelConfig.temperature;
+                console.log(`⚡ [${conversationId}] Standard model: using temperature=${requestConfig.temperature}`);
+            } else {
+                // Reasoning models (gpt-5, gpt-5.1)
+                console.log(`🧠 [${conversationId}] Reasoning model detected: ${agentConfig.modelConfig.model}`);
+                
+                // ⭐ TRY to send reasoning_effort (may or may not be supported in public API)
+                if (agentConfig.modelConfig.reasoningEffort) {
+                    requestConfig.reasoning_effort = agentConfig.modelConfig.reasoningEffort;
+                    console.log(`🎯 [${conversationId}] Sending reasoning_effort='${requestConfig.reasoning_effort}' (will test if supported)`);
+                }
+                
+                if (agentConfig.modelConfig.verbosity) {
+                    requestConfig.verbosity = agentConfig.modelConfig.verbosity;
+                    console.log(`🎯 [${conversationId}] Sending verbosity='${requestConfig.verbosity}' (will test if supported)`);
+                }
+                
+                // Temperature not supported in reasoning models
+            }
 
             console.log(`🔄 [${conversationId}] Using ${agentConfig.modelConfig.streaming ? 'STREAMING' : 'NON-STREAMING'} mode per agent config`);
 
@@ -173,7 +208,16 @@ class ResponsesClient {
             
             console.log(`🔍 [${conversationId}] RAW REQUEST PACKET:`, JSON.stringify(cleanedRequestConfig, null, 2));
 
-            const response = await this.openai.chat.completions.create(requestConfig);
+            // ================================================================
+            // ⭐ OPENAI REQUEST WITH ABORT CAPABILITY
+            // ================================================================
+            const openAIOptions = {};
+            if (abortController) {
+                openAIOptions.signal = abortController.signal;
+                console.log(`🎯 [${conversationId}] AbortController signal attached to OpenAI request`);
+            }
+
+            const response = await this.openai.chat.completions.create(requestConfig, openAIOptions);
 
             // LOG: RAW RESPONSE from OpenAI (complete packet)
             if (agentConfig.modelConfig.streaming) {
@@ -183,25 +227,96 @@ class ResponsesClient {
             }
 
             // Process response (streaming or non-streaming)
-            const result = await this.processStream(response, conversationId, messages, agentConfig);
+            const result = await this.processStream(response, conversationId, messages, agentConfig, abortController);
             
             console.log(`✅ [${conversationId}] Responses API processing completed`);
             return result;
 
         } catch (error) {
+            // ================================================================
+            // ⭐ HANDLE ABORT ERROR GRACEFULLY
+            // ================================================================
+            if (error.name === 'AbortError' || error.message?.includes('aborted')) {
+                console.log(`🚫 [${conversationId}] OpenAI request was aborted (expected behavior)`);
+                return {
+                    content: null,
+                    toolCalls: [],
+                    toolResults: [],
+                    hasTools: false,
+                    aborted: true,
+                    tokens: {},
+                    openaiResponseId: null,
+                    finishReason: 'aborted'
+                };
+            }
+            
             console.error(`❌ [${conversationId}] Responses API error:`, error.message);
             throw new Error(`AI processing failed: ${error.message}`);
         }
     }
 
     /**
-     * Build conversation messages from MongoDB conversation history
+     * Create contextual placeholder for historical images (when not including blob)
+     * Uses AI observation if available, falls back to metadata
+     * 
+     * @param {Object} message - Message object with fileStorage
+     * @returns {string} Formatted placeholder text
+     */
+    createImagePlaceholder(message) {
+        // ====================================================================
+        // ⭐ BEST OPTION: Use AI's visual description if available
+        // ====================================================================
+        
+        if (message.fileStorage?.aiObservation?.visualDescription) {
+            return `[Previously shared image: ${message.fileStorage.aiObservation.visualDescription}]`;
+        }
+        
+        // ====================================================================
+        // ⭐ FALLBACK: Build from metadata
+        // ====================================================================
+        
+        const parts = ['[Previously shared image'];
+        
+        if (message.fileStorage?.contentType) {
+            parts.push(`type: ${message.fileStorage.contentType}`);
+        }
+        
+        if (message.fileStorage?.filename) {
+            parts.push(`file: ${message.fileStorage.filename}`);
+        }
+        
+        if (message.fileStorage?.fileSizeHuman) {
+            parts.push(`size: ${message.fileStorage.fileSizeHuman}`);
+        }
+        
+        // Include user's text description if provided
+        const userText = message.content?.map(c => c.content).join(' ').trim();
+        if (userText && userText.length > 10) {
+            const truncatedText = userText.length > 100 ? userText.substring(0, 100) + '...' : userText;
+            parts.push(`context: "${truncatedText}"`);
+        }
+        
+        return parts.join(', ') + ']';
+    }
+
+    /**
+     * Build conversation messages from Message collection (separated)
+     * ⭐ PERFORMANCE: Redis cache layer for sub-ms access at scale
      */
     async buildMessages(conversationId, newMessage) {
+        const perfStart = performance.now();
         const conversation = await Conversation.findById(conversationId);
         
         // Load agent configuration from MongoDB
         const agentConfig = await this.loadAgentConfig(conversation?.agentId);
+        
+        // ====================================================================
+        // ⭐ GET IMAGE HISTORY SETTINGS
+        // ====================================================================
+        const imageHistoryMode = agentConfig.imageContextConfig?.historyMode || 'low';
+        const maxHistoricalImages = agentConfig.imageContextConfig?.maxHistoricalImages || 20;
+        
+        console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🖼️ [${conversationId}] Image history mode: ${imageHistoryMode} (max: ${maxHistoricalImages})`);
         
         // Load system prompt (debug mode or MongoDB)
         let systemPrompt = agentConfig.systemPrompt;
@@ -224,139 +339,360 @@ class ResponsesClient {
             { role: 'system', content: systemPrompt }
         ];
 
-        // Add conversation history in consistent JSON format (EXCLUDING the last message to avoid duplication)
-        if (conversation && conversation.messages) {
-            // Parse newMessage to get the message_id we should exclude
-            let newMessageId = null;
-            try {
-                const parsedNewMessage = JSON.parse(newMessage);
-                newMessageId = parsedNewMessage.messages?.[0]?.message_id;
-            } catch (e) {
-                // If newMessage is not JSON, we can't extract message_id
-            }
-
-            // 🔥 THIS IS A SIMPLIFICATION. The full logic is more complex.
-            // The key change is replacing the URL with a base64 data URI.
-            for (const msg of conversation.messages) {
-                // Skip the message that matches the new message being added (avoid duplication)
-                if (newMessageId && msg.msg_foreign_id === newMessageId) {
-                    console.log(`🚫 [${conversationId}] Skipping duplicate message: ${newMessageId}`);
-                    continue;
-                }
-
-                // 🔥 NEW ARCHITECTURE: Check if AI message has tool context for perfect reconstruction
-                if (msg.sender === 'ai_agent') {
-                    if (msg.openaiToolContext && msg.openaiToolContext.tool_calls && msg.openaiToolContext.tool_calls.length > 0) {
-                        console.log(`🛠️ [${conversationId}] Reconstructing OpenAI tool context from AI message for perfect conversation continuity`, {
-                            toolCount: msg.openaiToolContext.tool_calls.length,
-                            timestamp: msg.openaiToolContext.execution_metadata?.timestamp
-                        });
-                        
-                        // Step 1: Add assistant message with tool_calls (exactly as OpenAI sent it originally)
-                        messages.push({
-                            role: 'assistant',
-                            content: null, // OpenAI format for tool calls - no content when tool_calls present
-                            tool_calls: msg.openaiToolContext.tool_calls
-                        });
-                        
-                        // Step 2: Add tool result messages (exactly as OpenAI expects them)
-                        for (const toolResult of msg.openaiToolContext.tool_results) {
-                            messages.push({
-                                role: 'tool',
-                                content: toolResult.content,
-                                tool_call_id: toolResult.tool_call_id
-                            });
-                        }
-                        
-                        // Step 3: Add the final assistant response (with actual content)
-                        const reconstructedAssistantMessage = this.reconstructAssistantMessageAsJSON(msg);
-                        messages.push({
-                            role: 'assistant',
-                            content: reconstructedAssistantMessage
-                        });
-                        
-                        console.log(`✅ [${conversationId}] Tool context reconstructed from AI message: ${1 + msg.openaiToolContext.tool_results.length + 1} messages added`);
-                        
-                    } else {
-                        // Standard AI message processing (no tool context)
-                        const reconstructedAssistantMessage = this.reconstructAssistantMessageAsJSON(msg);
-                        messages.push({
-                            role: 'assistant',
-                            content: reconstructedAssistantMessage
-                        });
-                    }
-                } else if (msg.sender === 'user') {
-                    // 🔍 TRACE: Log historical user message being processed for context
-                    console.log(`[TRACE - buildMessages] Processing historical user message:`, {
-                      messageId: msg.msg_foreign_id,
-                      hasFileStorage: !!msg.fileStorage,
-                      fileStorageStatus: msg.fileStorage?.status,
-                      fileId: msg.fileStorage?.fileId,
-                      contentLength: msg.content?.length
-                    });
-
-                    // Standard user message processing
-                    const contentParts = [];
-                    const textContent = this.reconstructUserMessageAsJSON(msg, conversation);
-                    if (textContent && textContent.trim()) {
-                        contentParts.push({ type: 'text', text: textContent });
-                    }
-
-                    // 🔥 CRITICAL FIX: URL -> BASE64
-                    if (msg.fileStorage && msg.fileStorage.status === 'success' && msg.fileStorage.fileId) {
-                        const imagePart = await this.loadImageAsBase64(msg.fileStorage.fileId, conversationId);
-                        if (imagePart) {
-                            contentParts.push(imagePart);
-                        }
-                    }
+        // ====================================================================
+        // ⭐ REDIS CACHE LAYER: Active Conversations Strategy
+        // ====================================================================
+        // 
+        // Strategy:
+        // 1. Active conversations (< 2h): Redis cache (< 5ms access)
+        // 2. Inactive conversations (> 2h): MongoDB query (250ms, acceptable)
+        // 3. Max cached: 50 messages (FIFO, oldest discarded)
+        // 
+        // Cold Start (no Redis):
+        // - Load last 50 messages from MongoDB
+        // - Populate Redis with all loaded messages
+        // - Next messages: Progressive fill until 50
+        // - After 50: FIFO (remove oldest when adding new)
+        // 
+        // Hot Path (Redis exists):
+        // - Load from Redis (< 5ms) ⚡
+        // - MongoDB untouched
+        // - TTL refreshed on each new message (2h window)
+        
+        let conversationMessages;
+        const MAX_HISTORY_MESSAGES = 50; // Max messages for OpenAI context
+        
+        // ================================================================
+        // ⭐ TRY REDIS FIRST (active conversations)
+        // ================================================================
+        conversationMessages = await loadMessagesFromRedis(conversationId, MAX_HISTORY_MESSAGES);
+        
+        if (!conversationMessages) {
+            // ================================================================
+            // ⭐ CACHE MISS: Cold Start - Load from MongoDB
+            // ================================================================
+            // Conversation either:
+            // - Never cached (first time)
+            // - Inactive > 2h (TTL expired)
+            
+            console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🔄 [${conversationId}] Redis MISS (inactive or first time) - loading from MongoDB`);
+            
+            // Load last 50 messages (or less if conversation is new)
+            conversationMessages = await Message.find({ conversationId })
+                .sort({ timestamp: -1 })
+                .limit(MAX_HISTORY_MESSAGES)
+                .select('-fileStorage.base64Cache.data')
+            .lean();
+        
+            conversationMessages.reverse(); // Chronological order
+            
+            // ============================================================
+            // ⭐ POPULATE REDIS (non-blocking)
+            // ============================================================
+            // Start Redis cache for this conversation
+            // Will fill progressively until 50 messages
+            // Then FIFO (oldest discarded)
+            
+            populateCache(conversationId, conversationMessages).catch(err => {
+                console.warn(`⚠️ Failed to populate Redis cache:`, err.message);
+            });
+            
+            console.log(`[+${Math.round(performance.now() - perfStart)}ms] 📂 [${conversationId}] Loaded ${conversationMessages.length} messages from MongoDB (populating Redis)`);
+        } else {
+            // ================================================================
+            // ⭐ SMART DETECTION: Incomplete Redis Cache
+            // ================================================================
+            // If Redis has VERY FEW messages (< 5), might be incomplete cache
+            // (e.g., only the latest message was cached, not full history)
+            
+            if (conversationMessages.length < 5) {
+                console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⚠️ [${conversationId}] Redis has only ${conversationMessages.length} messages - checking MongoDB for more`);
+                
+                // Check if MongoDB has more messages
+                const mongoCount = await Message.countDocuments({ conversationId });
+                
+                if (mongoCount > conversationMessages.length) {
+                    console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🔄 [${conversationId}] Incomplete cache detected (Redis: ${conversationMessages.length}, MongoDB: ${mongoCount}) - reloading from MongoDB`);
                     
-                    let finalContent;
-                    if (contentParts.length === 1 && contentParts[0].type === 'text') {
-                        finalContent = contentParts[0].text;
-                    } else if (contentParts.length === 0) {
-                        finalContent = "";
-                    } else {
-                        finalContent = contentParts;
-                    }
-
-                    messages.push({
-                        role: 'user',
-                        content: finalContent
+                    // Load full history from MongoDB
+                    conversationMessages = await Message.find({ conversationId })
+                        .sort({ timestamp: -1 })
+                        .limit(MAX_HISTORY_MESSAGES)
+                        .select('-fileStorage.base64Cache.data')
+                        .lean();
+                    
+                    conversationMessages.reverse(); // Chronological order
+                    
+                    // Re-populate Redis with complete history (non-blocking)
+                    populateCache(conversationId, conversationMessages).catch(err => {
+                        console.warn(`⚠️ Failed to re-populate Redis cache:`, err.message);
                     });
+                    
+                    console.log(`[+${Math.round(performance.now() - perfStart)}ms] ✅ [${conversationId}] Loaded ${conversationMessages.length} messages from MongoDB (re-populated Redis)`);
+                } else {
+                    console.log(`[+${Math.round(performance.now() - perfStart)}ms] ♻️ [${conversationId}] Redis HIT - ${conversationMessages.length} messages (< 5ms) ⚡`);
+                }
+            } else {
+                console.log(`[+${Math.round(performance.now() - perfStart)}ms] ♻️ [${conversationId}] Redis HIT - ${conversationMessages.length} messages (< 5ms) ⚡`);
+            }
+        }
+
+        // ====================================================================
+        // ⭐ FIND LAST ASSISTANT MESSAGE (for 'low' mode cutoff)
+        // ====================================================================
+        
+        let lastAssistantMessageIndex = -1;
+        
+        if (imageHistoryMode === 'low') {
+            for (let i = conversationMessages.length - 1; i >= 0; i--) {
+                if (conversationMessages[i].sender === 'ai_agent') {
+                    lastAssistantMessageIndex = i;
+                    console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🔍 [${conversationId}] Last assistant message at index ${i}`);
+                    break;
                 }
             }
         }
 
-        // Add new user message (only once)
-        messages.push({
-            role: 'user',
-            content: newMessage
-        });
+        // ====================================================================
+        // ⭐ TRACK IMAGE INCLUSION FOR SMART HISTORY
+        // ====================================================================
+        let imagesIncluded = 0;
+        let imagesPlaceholdered = 0;
 
-        console.log(`📝 [${conversationId}] Built ${messages.length} messages for context`);
+        // ====================================================================
+        // ⭐ Process ALL messages (no skipping - Redis/MongoDB have correct order)
+        // ====================================================================
+        // All messages are already in MongoDB/Redis in chronological order
+        // No need to skip duplicates - they're the source of truth
+        
+        for (let i = 0; i < conversationMessages.length; i++) {
+            const msg = conversationMessages[i];
+
+            // Check if AI message has tool context for perfect reconstruction
+            if (msg.sender === 'ai_agent') {
+                if (msg.openaiToolContext && msg.openaiToolContext.tool_calls && msg.openaiToolContext.tool_calls.length > 0) {
+                    console.log(`🛠️ [${conversationId}] Reconstructing OpenAI tool context`, {
+                        toolCount: msg.openaiToolContext.tool_calls.length
+                    });
+                    
+                    // Step 1: Add assistant message with tool_calls
+                    messages.push({
+                        role: 'assistant',
+                        content: null,
+                        tool_calls: msg.openaiToolContext.tool_calls
+                    });
+                    
+                    // Step 2: Add tool result messages
+                    for (const toolResult of msg.openaiToolContext.tool_results) {
+                        messages.push({
+                            role: 'tool',
+                            content: toolResult.content,
+                            tool_call_id: toolResult.tool_call_id
+                        });
+                    }
+                    
+                    // Step 3: Add the final assistant response
+                    const reconstructedAssistantMessage = this.reconstructAssistantMessageAsJSON(msg);
+                    messages.push({
+                        role: 'assistant',
+                        content: reconstructedAssistantMessage
+                    });
+                    
+                    console.log(`✅ [${conversationId}] Tool context reconstructed: ${1 + msg.openaiToolContext.tool_results.length + 1} messages added`);
+                    
+                } else {
+                    // Standard AI message processing (no tool context)
+                    const reconstructedAssistantMessage = this.reconstructAssistantMessageAsJSON(msg);
+                    messages.push({
+                        role: 'assistant',
+                        content: reconstructedAssistantMessage
+                    });
+                }
+            } else if (msg.sender === 'user') {
+                console.log(`[TRACE - buildMessages] Processing historical user message:`, {
+                  messageId: msg.msg_foreign_id,
+                  hasFileStorage: !!msg.fileStorage,
+                  fileStorageStatus: msg.fileStorage?.status,
+                  fileId: msg.fileStorage?.fileId
+                });
+
+                // Standard user message processing
+                const contentParts = [];
+                const textContent = this.reconstructUserMessageAsJSON(msg, conversation);
+                if (textContent && textContent.trim()) {
+                    contentParts.push({ type: 'text', text: textContent });
+                }
+
+                // ================================================================
+                // ⭐ SMART IMAGE INCLUSION LOGIC
+                // ================================================================
+                
+                if (msg.fileStorage && msg.fileStorage.status === 'success' && msg.fileStorage.fileId) {
+                    // ============================================================
+                    // ⭐ CRITICAL: Skip AUDIO files (only process actual IMAGES)
+                    // ============================================================
+                    const contentType = msg.fileStorage.contentType || '';
+                    const isAudioFile = contentType.includes('audio/') || contentType.includes('ogg');
+                    
+                    if (isAudioFile) {
+                        console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🎵 [${conversationId}] Skipping audio file (not an image): ${msg.fileStorage.fileId}`);
+                        // Audio files should not be included as images - continue to next message
+                    } else {
+                        // This is an actual image file - process normally
+                        let shouldIncludeBlob = false;
+                        
+                        switch (imageHistoryMode) {
+                            case 'full':
+                                // Always include blob (respecting max limit)
+                                shouldIncludeBlob = (imagesIncluded < maxHistoricalImages);
+                                break;
+                                
+                            case 'low':
+                                // Only include if AFTER last assistant message
+                                shouldIncludeBlob = (i > lastAssistantMessageIndex) && (imagesIncluded < maxHistoricalImages);
+                                break;
+                                
+                            case 'none':
+                                // Never include historical blobs
+                                shouldIncludeBlob = false;
+                                break;
+                        }
+                    
+                    if (shouldIncludeBlob) {
+                        // ============================================================
+                        // ⭐ INCLUDE ACTUAL BLOB (with caching)
+                        // ============================================================
+                        
+                        // Load full message with blob cache data
+                        const fullMessage = await Message.findById(msg._id)
+                            .select('+fileStorage.base64Cache.data')  // Explicitly include
+                            .lean();
+                        
+                        const imagePart = await this.loadImageAsBase64(fullMessage, conversationId, false);
+                        
+                    if (imagePart) {
+                        contentParts.push(imagePart);
+                            imagesIncluded++;
+                            console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🖼️ [${conversationId}] Included image blob #${imagesIncluded}: ${msg.fileStorage.fileId}`);
+                        }
+                        
+                    } else {
+                        // ============================================================
+                        // ⭐ USE CONTEXTUAL PLACEHOLDER (save time + tokens)
+                        // ============================================================
+                        
+                        const placeholder = this.createImagePlaceholder(msg);
+                        
+                        // Append to text content
+                        if (contentParts.length > 0 && contentParts[0].type === 'text') {
+                            contentParts[0].text += `\n\n${placeholder}`;
+                        } else {
+                            contentParts.push({ type: 'text', text: placeholder });
+                        }
+                        
+                        imagesPlaceholdered++;
+                        console.log(`[+${Math.round(performance.now() - perfStart)}ms] 📝 [${conversationId}] Used placeholder for: ${msg.fileStorage.fileId}`);
+                    }
+                    }  // ⭐ Close else (not audio file)
+                }
+                
+                let finalContent;
+                if (contentParts.length === 1 && contentParts[0].type === 'text') {
+                    finalContent = contentParts[0].text;
+                } else if (contentParts.length === 0) {
+                    finalContent = "";
+                } else {
+                    finalContent = contentParts;
+                }
+
+                messages.push({
+                    role: 'user',
+                    content: finalContent
+                });
+            }
+        }
+
+        // ====================================================================
+        // ⭐ NO need to add newMessage - already in Redis/MongoDB cache
+        // ====================================================================
+        // All messages are loaded from cache in correct chronological order
+        // No duplicate messages, no manual appending needed
+        
+        console.log(`[+${Math.round(performance.now() - perfStart)}ms] 📝 [${conversationId}] Built ${messages.length} messages for OpenAI context`, {
+            imagesIncluded,
+            imagesPlaceholdered,
+            tokensSavedEstimate: imagesPlaceholdered * 1000,
+            source: conversationMessages.length > 0 ? (conversationMessages[0]._id ? 'MongoDB' : 'Redis') : 'empty'
+        });
+        
         return messages;
     }
 
     /**
      * Downloads an image from our file storage and prepares it in base64 format for OpenAI.
-     * This is the robust way to handle images, giving us full control over headers and retries.
-     * @param {string} fileId - The file ID to download
+     * 
+     * ⭐ PERFORMANCE OPTIMIZATION: Blob caching system
+     * - First request: Download and cache blob in MongoDB
+     * - Subsequent requests: Reuse cached blob (saves 0.5-1s per image + ~1000 tokens)
+     * - Cache TTL: 30 days
+     * 
+     * @param {Object} message - Full message object from MongoDB (must include fileStorage.base64Cache if queried)
      * @param {string} conversationId - For logging purposes
-     * @returns {Object|null} OpenAI-compatible image part or null if download fails
+     * @param {boolean} forceReload - Force re-download even if cached
+     * @returns {Object|null} OpenAI-compatible image part or null if fails
      */
-    async loadImageAsBase64(fileId, conversationId) {
+    async loadImageAsBase64(message, conversationId, forceReload = false) {
+        const perfStart = performance.now();
+        const fileId = message.fileStorage?.fileId;
+        
+        if (!fileId) {
+            console.log(`[+0ms] ⚠️ [${conversationId}] No fileId found in message`);
+            return null;
+        }
+        
+        // ====================================================================
+        // ⭐ OPTIMIZATION: Use cached blob if available
+        // ====================================================================
+        
+        if (!forceReload && message.fileStorage.base64Cache?.data) {
+            const cacheAge = Date.now() - new Date(message.fileStorage.base64Cache.cachedAt).getTime();
+            const MAX_CACHE_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days
+            
+            if (cacheAge < MAX_CACHE_AGE) {
+                const elapsed = Math.round(performance.now() - perfStart);
+                const cacheAgeMin = Math.round(cacheAge / 1000 / 60);
+                
+                console.log(`[+${elapsed}ms] ♻️ [${conversationId}] Using cached blob: ${fileId} (age: ${cacheAgeMin}min, size: ${message.fileStorage.base64Cache.sizeKB}KB)`);
+                
+                return {
+                    type: 'image_url',
+                    image_url: {
+                        url: `data:${message.fileStorage.base64Cache.mimeType};base64,${message.fileStorage.base64Cache.data}`
+                    }
+                };
+            } else {
+                const cacheAgeDays = Math.round(cacheAge / 1000 / 60 / 60 / 24);
+                console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⚠️ [${conversationId}] Cached blob expired (${cacheAgeDays} days old) - re-downloading`);
+            }
+        }
+        
+        // ====================================================================
+        // ⭐ DOWNLOAD & CACHE: First time or expired/missing cache
+        // ====================================================================
+        
+        console.log(`[+${Math.round(performance.now() - perfStart)}ms] 📥 [${conversationId}] Downloading and caching image: ${fileId}`);
+        
         try {
             const downloadUrl = createDownloadUrl(fileId);
-            console.log(`📥 [${conversationId}] Downloading image to send as base64: ${downloadUrl}`);
 
             const response = await axios({
                 method: 'get',
                 url: downloadUrl,
                 responseType: 'arraybuffer',
-                timeout: 60000, // 60s timeout
+                timeout: 60000,
                 headers: {
                     'User-Agent': 'Micro-Banana-ResponsesClient/1.0',
-                    'X-API-Key': process.env.API_KEY_WEBHOOK // 🔥 CRITICAL: Use API Key in header
+                    'X-API-Key': process.env.API_KEY_WEBHOOK
                 }
             });
 
@@ -364,34 +700,58 @@ class ResponsesClient {
                 throw new Error(`HTTP ${response.status}`);
             }
 
-            const base64Image = Buffer.from(response.data).toString('base64');
+            const base64Data = Buffer.from(response.data).toString('base64');
             const mimeType = response.headers['content-type'] || 'image/jpeg';
+            const sizeBytes = response.data.length;
+            const sizeKB = Math.round(sizeBytes / 1024);
 
-            console.log(`✅ [${conversationId}] Image downloaded and encoded successfully`, {
-                fileId: fileId,
-                size: `${Math.round(response.data.length / 1024)}KB`
-            });
+            console.log(`[+${Math.round(performance.now() - perfStart)}ms] ✅ [${conversationId}] Image downloaded (${sizeKB}KB)`);
+            
+            // ================================================================
+            // ⭐ SAVE TO MONGODB: Cache for future requests
+            // ================================================================
+            
+            try {
+                const Message = require('../models/Message');
+                await Message.findByIdAndUpdate(message._id, {
+                    'fileStorage.base64Cache': {
+                        data: base64Data,
+                        mimeType: mimeType,
+                        cachedAt: new Date(),
+                        sizeBytes: sizeBytes,
+                        sizeKB: sizeKB
+                    }
+                });
+                
+                console.log(`[+${Math.round(performance.now() - perfStart)}ms] 💾 [${conversationId}] Blob cached in MongoDB: ${fileId} (${sizeKB}KB)`);
+            } catch (cacheError) {
+                console.error(`⚠️ Failed to cache blob (non-blocking):`, cacheError.message);
+                // Continue - caching is optimization, not critical path
+            }
 
             return {
                 type: 'image_url',
                 image_url: {
-                    url: `data:${mimeType};base64,${base64Image}`
+                    url: `data:${mimeType};base64,${base64Data}`
                 }
             };
 
         } catch (error) {
-            console.error(`❌ [${conversationId}] Failed to download or encode image ${fileId}:`, error.message);
-            return null; // Return null to gracefully skip the image
+            console.error(`❌ [${conversationId}] Failed to download image ${fileId}:`, error.message);
+            return null;
         }
     }
 
     /**
      * Process response (streaming or non-streaming) with tool calls handling
+     * ⭐ Enhanced with AbortController support and token tracking
      */
-    async processStream(response, conversationId, messages, agentConfig) {
+    async processStream(response, conversationId, messages, agentConfig, abortController = null) {
         let toolCalls = [];
         let assistantMessage = '';
         let finishReason = null;
+        let tokens = {};
+        let openaiResponseId = null;
 
         if (agentConfig.modelConfig.streaming) {
             console.log(`🔄 [${conversationId}] Processing streaming response...`);
@@ -430,6 +790,10 @@ class ResponsesClient {
                 assistantMessage = choice.message?.content || '';
                 finishReason = choice.finish_reason;
             }
+            
+            // ⭐ Extract tokens and response ID
+            tokens = response.usage || {};
+            openaiResponseId = response.id;
         }
 
         // Handle tool calls if present
@@ -452,13 +816,39 @@ class ResponsesClient {
             ];
 
             // Get final response after tool execution
-            const finalResponse = await this.openai.chat.completions.create({
+            // ⭐ Include abort signal for second request too
+            const toolOpenAIOptions = abortController ? { signal: abortController.signal } : {};
+            
+            // ⭐ Build tool continuation config
+            const toolRequestConfig = {
                 model: agentConfig.modelConfig.model,
                 messages: continuationMessages,
                 response_format: { type: 'json_schema', json_schema: agentConfig.responseSchema },
                 max_completion_tokens: agentConfig.modelConfig.maxCompletionTokens,
                 stream: agentConfig.modelConfig.streaming
-            });
+            };
+            
+            // ================================================================
+            // ⭐ Detect reasoning model (needed in this scope)
+            // ================================================================
+            const modelName = agentConfig.modelConfig.model.toLowerCase();
+            const isReasoningModel = modelName.includes('gpt-5') && !modelName.includes('mini');
+            
+            // Apply model-specific parameters
+            if (!isReasoningModel) {
+                // Standard models
+                toolRequestConfig.temperature = agentConfig.modelConfig.temperature;
+            } else {
+                // Reasoning models - try to send reasoning parameters
+                if (agentConfig.modelConfig.reasoningEffort) {
+                    toolRequestConfig.reasoning_effort = agentConfig.modelConfig.reasoningEffort;
+                }
+                if (agentConfig.modelConfig.verbosity) {
+                    toolRequestConfig.verbosity = agentConfig.modelConfig.verbosity;
+                }
+            }
+            
+            const finalResponse = await this.openai.chat.completions.create(toolRequestConfig, toolOpenAIOptions);
 
             // Process final response based on streaming mode
             let finalContent = '';
@@ -470,6 +860,14 @@ class ResponsesClient {
                 }
             } else {
                 finalContent = finalResponse.choices?.[0]?.message?.content || '';
+            }
+
+            // ⭐ Extract tokens from final response
+            if (finalResponse.usage) {
+                tokens = finalResponse.usage;
+            }
+            if (finalResponse.id) {
+                openaiResponseId = finalResponse.id;
             }
 
             // LOG: Complete response from OpenAI (FULL CONTENT, no truncation)
@@ -488,14 +886,20 @@ class ResponsesClient {
                 tool_results_full: toolResults.map(tr => ({
                     tool_call_id: tr.tool_call_id,
                     output_full: tr.output // FULL output, no preview
-                }))
+                })),
+                tokens: tokens,  // ⭐ NEW: Token usage
+                response_id: openaiResponseId  // ⭐ NEW: Response ID
             }, null, 2));
 
             return {
                 content: finalContent,
                 toolCalls: toolCalls,
                 toolResults: toolResults,
-                hasTools: true
+                hasTools: true,
+                tokens: tokens,              // ⭐ NEW
+                openaiResponseId: openaiResponseId,  // ⭐ NEW
+                finishReason: finishReason,  // ⭐ NEW
+                aborted: false
             };
         }
 
@@ -505,14 +909,20 @@ class ResponsesClient {
             finish_reason: finishReason,
             content_length: assistantMessage.length,
             content_full: assistantMessage, // FULL content, no truncation
-            has_tools: false
+            has_tools: false,
+            tokens: tokens,  // ⭐ NEW
+            response_id: openaiResponseId  // ⭐ NEW
         }, null, 2));
 
         return {
             content: assistantMessage,
             toolCalls: [],
             toolResults: [],
-            hasTools: false
+            hasTools: false,
+            tokens: tokens,              // ⭐ NEW
+            openaiResponseId: openaiResponseId,  // ⭐ NEW
+            finishReason: finishReason,  // ⭐ NEW
+            aborted: false
         };
     }
 
@@ -600,8 +1010,8 @@ class ResponsesClient {
                 throw new Error('Conversation not found');
             }
             
-            const { Agent } = require('../models');
-            const agent = await Agent.findByPk(conversation.agentId);
+            const Agent = require('../models/Agent');
+            const agent = await Agent.findById(conversation.agentId);
             if (!agent) {
                 throw new Error('Agent not found');
             }
@@ -674,16 +1084,27 @@ class ResponsesClient {
                 return JSON.parse(cachedConfig);
             }
 
-            // Load from MongoDB
+            // Load agent from MongoDB (consolidated model)
             console.log(`📥 [Agent ${agentId}] Loading configuration from MongoDB`);
-            const agentConfig = await AgentConfig.findByAgentId(agentId);
+            const agent = await Agent.findById(agentId);
             
-            if (!agentConfig) {
+            if (!agent) {
                 throw new Error(`No configuration found for agent ${agentId}`);
             }
 
-            // Cache for future use (1 hour TTL)
-            await redisClient.setEx(cacheKey, 3600, JSON.stringify(agentConfig));
+            // Format as agentConfig for compatibility
+            const agentConfig = {
+                agentId: agent._id,
+                agentName: agent.name,
+                status: agent.status,
+                systemPrompt: agent.systemPrompt,
+                modelConfig: agent.modelConfig,
+                responseSchema: agent.responseSchema,
+                metadata: agent.metadata
+            };
+
+            // ⭐ OPTIMIZATION: Cache for 24 hours (prompts rarely change)
+            await redisClient.setEx(cacheKey, 86400, JSON.stringify(agentConfig));
             
             console.log(`✅ [Agent ${agentId}] Loaded configuration`, {
                 version: agentConfig.metadata.version,

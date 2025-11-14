@@ -1,7 +1,7 @@
 /**
  * services/googleGeminiService.js
  * 
- * Description: Google Gemini API integration service for image processing and generation using gemini-2.5-flash-image-preview model
+ * Description: Google Gemini API integration service for image processing and generation using gemini-2.5-flash-image stable model
  * 
  * Role in the system: Handles all interactions with Google Gemini API for image understanding, generation, and editing
  * 
@@ -33,8 +33,8 @@ class GoogleGeminiService {
       apiKey: process.env.GEMINI_API_KEY
     });
     
-    // Model configuration for image processing
-    this.MODEL_NAME = 'gemini-2.5-flash-image-preview';
+    // Model configuration for image processing (STABLE - not preview)
+    this.MODEL_NAME = 'gemini-2.5-flash-image';
     this.DEFAULT_CONFIG = {
       responseModalities: ['IMAGE'],
       systemInstruction: []
@@ -102,18 +102,47 @@ class GoogleGeminiService {
       }
 
       // Add current user turn
-      const currentParts = [{ text: currentPrompt }];
+      const currentParts = [];
       
-      // Add ONLY current turn images using ROBUST method (not all inputImages from history)
-      console.log(`🖼️ [${requestId}] Adding ${currentTurnImages.length} images to current turn (NOT ${request.inputImages.length} total images)`);
+      // ====================================================================
+      // ⭐ CRITICAL: Label images for Gemini clarity
+      // ====================================================================
+      // When multiple images are provided, Gemini needs explicit labels to know:
+      // - Which images are references vs target
+      // - Which image to edit
+      // - Order and purpose of each image
+      
       if (currentTurnImages.length > 0) {
-        // Use the SAME robust method that works for prepareImagesForGemini
+        console.log(`🖼️ [${requestId}] Adding ${currentTurnImages.length} labeled images to current turn`);
+        
+        // Prepare all images first
         const imageContents = await this.prepareImagesForGemini(currentTurnImages, requestId);
-        for (const imageContent of imageContents) {
-          currentParts.push(imageContent);
+        
+        // ================================================================
+        // ⭐ Strategy: Last image = TARGET, rest = REFERENCES
+        // ================================================================
+        // Assumption: In multi-image edits, user typically sends:
+        // - Reference images first (objects to use)
+        // - Target image last (image to edit)
+        
+        for (let i = 0; i < imageContents.length; i++) {
+          const isLastImage = i === imageContents.length - 1;
+          const imageLabel = isLastImage && imageContents.length > 1
+            ? `TARGET IMAGE (edit this one)`
+            : imageContents.length > 1
+              ? `REFERENCE IMAGE ${i + 1} (use elements from this)`
+              : `INPUT IMAGE`;
+          
+          // Add label BEFORE image
+          currentParts.push({ text: `\n--- ${imageLabel} ---` });
+          currentParts.push(imageContents[i]);
         }
-        console.log(`✅ [${requestId}] Successfully prepared ${imageContents.length}/${currentTurnImages.length} current turn images`);
+        
+        console.log(`✅ [${requestId}] Successfully labeled and prepared ${imageContents.length} images`);
       }
+      
+      // Add prompt AFTER images (so labels are clear)
+      currentParts.push({ text: `\n--- INSTRUCTIONS ---\n${currentPrompt}` });
       
       contents.push({
         role: 'user',

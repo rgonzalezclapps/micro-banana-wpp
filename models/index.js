@@ -1,48 +1,46 @@
-const fs = require('fs');
-const path = require('path');
-const Sequelize = require('sequelize');
-const basename = path.basename(__filename);
+/**
+ * models/index.js
+ * 
+ * Description: Centralized model exports for MongoDB-only architecture
+ * 
+ * Role in the system: Single point of import for all database models
+ * 
+ * Node.js Context: Model Index - MongoDB model exports (PostgreSQL removed)
+ * 
+ * Dependencies:
+ * - mongoose (all models are MongoDB/Mongoose)
+ * 
+ * Dependants:
+ * - All modules, routes, services, and tools that import models
+ */
 
-// 🏗️ PROFESSIONAL APPROACH: Import centralized database connection
-const { sequelize } = require('../database');
+// ============================================================================
+// MongoDB Models (Mongoose) - Complete System
+// ============================================================================
 
-const db = {};
+const Agent = require('./Agent');
+const Participant = require('./Participant');
+const Conversation = require('./Conversation');
+const Message = require('./Message');
+const Payment = require('./Payment');
+const Request = require('./Request');
+const ToolSchema = require('./ToolSchema');
 
-fs
-  .readdirSync(__dirname)
-  .filter(file => {
-    return (file.indexOf('.') !== 0) && (file !== basename) && (file.slice(-3) === '.js');
-  })
-  .forEach(file => {
-    const model = require(path.join(__dirname, file))(sequelize, Sequelize.DataTypes);
-    db[model.name] = model;
-  });
+// ============================================================================
+// Export All Models
+// ============================================================================
 
-  // Generic chatbot engine models - MongoDB-first architecture
-  db.Agent = require('./Agent')(sequelize, Sequelize.DataTypes);
-  // db.Client = require('./Client')(sequelize, Sequelize.DataTypes); // Client model removed
-  // db.Participant = require('./Participant')(sequelize, Sequelize.DataTypes); // Participant moved to MongoDB
-  db.ParticipantAgentAssociation = require('./ParticipantAgentAssociation')(sequelize, Sequelize.DataTypes);
-  // db.Payment = require('./Payment')(sequelize, Sequelize.DataTypes); // Payment moved to MongoDB
-
-// Website generation system - handled by automatic loop above
-
-Object.keys(db).forEach(modelName => {
-  if (db[modelName].associate) {
-    db[modelName].associate(db);
-  }
-});
-
-db.sequelize = sequelize;
-db.Sequelize = Sequelize;
-
-// MongoDB models (Mongoose) - Added for request processing system
-db.Conversation = require('./Conversation');
-db.Request = require('./Request');
-db.Payment = require('./Payment');
-db.ParticipantProfile = require('./ParticipantProfile');
-db.PaymentRecord = require('./PaymentRecord');
-db.AgentConfig = require('./AgentConfig');
-db.ToolSchema = require('./ToolSchema');
-
-module.exports = db;
+module.exports = {
+  // Core Models
+  Agent,
+  Participant,
+  Conversation,
+  Message,
+  
+  // Payment System
+  Payment,
+  
+  // AI & Tools
+  Request,
+  ToolSchema
+};

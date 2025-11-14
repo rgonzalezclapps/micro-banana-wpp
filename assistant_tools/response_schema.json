@@ -121,13 +121,41 @@
           "image_processing"
         ],
         "additionalProperties": false
+      },
+      "images_observed": {
+        "type": "array",
+        "description": "ONLY populate with observations if images were sent in user's current message. If NO images in current message, leave as empty array []. Array of AI observations for each image to enable future context without re-sending blobs. Saves time and tokens on subsequent requests.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "message_id": {
+              "type": "string",
+              "description": "The message_id that contained this image (from user's message)"
+            },
+            "metadetails": {
+              "type": "string",
+              "description": "Technical metadata: filename, file type, size, upload timestamp in human-readable format"
+            },
+            "visual_description": {
+              "type": "string",
+              "description": "Comprehensive visual description of image content (2-3 sentences): subjects/objects, colors and composition, context and environment, technical details (lighting, angle, condition). Must be detailed enough to reference in future messages without seeing the actual image."
+            }
+          },
+          "required": [
+            "message_id",
+            "metadetails",
+            "visual_description"
+          ],
+          "additionalProperties": false
+        }
       }
     },
     "required": [
       "timestamp",
       "thinking",
       "response", 
-      "ai_system_message"
+      "ai_system_message",
+      "images_observed"
     ],
     "additionalProperties": false
   }

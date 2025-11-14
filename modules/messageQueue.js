@@ -1,5 +1,28 @@
+/**
+ * modules/messageQueue.js
+ * 
+ * Description: Message queue system with separated Message collection support
+ * 
+ * Role in the system: Async message processing with audio transcription and AI integration
+ * 
+ * Node.js Context: Module - Message queuing and batch processing
+ * 
+ * Dependencies:
+ * - models/Conversation.js (conversation metadata)
+ * - models/Message.js (separated message storage)
+ * - models/Agent.js (MongoDB agent queries)
+ * - modules/openaiIntegration.js (AI processing)
+ * - services/* (message delivery services)
+ * 
+ * Dependants:
+ * - routes/webhookRoutes.js (message queueing)
+ * - modules/messageProcessor.js (message creation)
+ */
+
 const Conversation = require('../models/Conversation');
-const { Agent } = require('../models'); // Add this line
+const Message = require('../models/Message');
+const Agent = require('../models/Agent');
+const AIRequest = require('../models/AIRequest'); // ⭐ NEW: AI request tracking
 const openAIIntegration = require('./openaiIntegration');
 const audioTranscriber = require('./audioTranscriber');
 const { chunkMessage } = require('../utils/messageUtils');
@@ -11,28 +34,74 @@ const { transcribeAudioWithTimeout } = require('./audioTranscriber');
 const { redisClient } = require('../database');
 const { saveWithRetry } = require('../utils/dbUtils');
 const { getAudioUrl } = require('../services/whatsappFactoryMediaService');
+const { createTracker } = require('../utils/performanceTracker'); // ⭐ NEW: Performance tracking
+const { cacheMessage } = require('../utils/redisConversationCache'); // ⭐ NEW: Redis message cache
 
 class MessageQueue {
   constructor() {
     this.queues = new Map();
-    this.queueTimers = new Map();
+    this.queueTimers = new Map();              // DEPRECATED - will be replaced by accumulationTimers
     this.activeRuns = new Map();
-    this.queueInterval = 2000; // 2 seconds
+    this.queueInterval = process.env.QUEUE_INTERVAL_MS ? parseInt(process.env.QUEUE_INTERVAL_MS) : 2000;
     this.maxQueueWaitTime = 30000; // 30 seconds
-    this.processAudioMessage = false; // Add this line
+    this.processAudioMessage = false;
     this.retryInterval = 1000; // 1 second
     
-    // 🔥 NEW: Media completion tracking to prevent race conditions
+    // Media completion tracking to prevent race conditions
     this.pendingMedia = new Map(); // conversationId -> Set of pending media requestIds
     this.mediaCompletionTimers = new Map(); // conversationId -> cleanup timer
     this.mediaTimeout = 15000; // 15 seconds timeout for media operations
+    
+    // ========================================================================
+    // ⭐ NEW: Performance Optimization & Abort System
+    // ========================================================================
+    
+    // Processing context tracking (for abort capability)
+    this.processing = new Map(); // conversationId -> ProcessingContext
+    
+    // Smart accumulation timers (replaces queueTimers with intelligent logic)
+    this.accumulationTimers = new Map(); // conversationId -> setTimeout reference
+    this.ACCUMULATION_WINDOW = 300; // 300ms pure accumulation window
+    
+    // Performance trackers (high-precision timing)
+    this.performanceTrackers = new Map(); // conversationId -> PerformanceTracker
+    
+    // ========================================================================
+    // ⭐ NEW: Placeholder System for Async Operations (Audio/Image)
+    // ========================================================================
+    // Tracks messages that need async processing (transcription, blob download)
+    // Queue processing waits until all placeholders are complete
+    
+    this.placeholders = new Map(); // conversationId -> Map<messageId, PlaceholderInfo>
+    
+    /*
+    PlaceholderInfo = {
+      type: 'audio' | 'image',
+      messageId: string,
+      startTime: Date,
+      status: 'processing' | 'complete' | 'failed',
+      originalTimestamp: Date  // For chronological ordering
+    }
+    */
+    
+    console.log(`🕐 MessageQueue initialized with smart accumulation: ${this.ACCUMULATION_WINDOW}ms window`);
   }
 
   async addMessage(conversation, messageData, agent = null) {
     const conversationId = conversation._id.toString();
     
-    // 🔍 TRACE: Log messageData upon arrival in the queue
-    console.log(`[TRACE - addMessage] Received messageData:`, {
+    // ====================================================================
+    // ⭐ INITIALIZE PERFORMANCE TRACKER
+    // ====================================================================
+    if (!this.performanceTrackers.has(conversationId)) {
+      const tracker = createTracker(conversationId);
+      this.performanceTrackers.set(conversationId, tracker);
+      tracker.checkpoint('queue_start', { messageId: messageData.msg_foreign_id });
+    }
+    
+    const perf = this.performanceTrackers.get(conversationId);
+    
+    perf.log('message_received', `[TRACE - addMessage] Received messageData`, {
       messageId: messageData.msg_foreign_id,
       hasFileStorage: !!messageData.fileStorage,
       fileStorageStatus: messageData.fileStorage?.status,
@@ -41,7 +110,7 @@ class MessageQueue {
 
     if (!this.queues.has(conversationId)) {
       this.queues.set(conversationId, []);
-      console.log('Queue created for conversation:', conversationId);
+      console.log(`${perf.prefix()} Queue created for conversation: ${conversationId}`);
     }
 
     const queue = this.queues.get(conversationId);
@@ -49,9 +118,9 @@ class MessageQueue {
     // Add message to queue
     queue.push(messageData);
 
-    // 🔍 DIAGNOSTIC: Show media tracking status
+    // Show media tracking status
     const pendingMediaCount = this.pendingMedia.get(conversationId)?.size || 0;
-    console.log(`📦 [${conversationId}] Message added to queue`, {
+    perf.log('message_queued', `📦 Message added to queue`, {
       queueLength: queue.length,
       messageType: messageData.ultraMsgData.type,
       hasFileStorage: messageData.fileStorage?.status !== 'not_applicable',
@@ -59,24 +128,136 @@ class MessageQueue {
       pendingMediaOperations: pendingMediaCount
     });
 
-    // Handle audio messages
-    if (messageData.ultraMsgData.type === 'ptt' || messageData.ultraMsgData.type === 'audio') {
+    // ====================================================================
+    // ⭐ DETECT ASYNC OPERATIONS: Audio or Image (BEFORE smart decision)
+    // ====================================================================
+    const messageType = messageData.ultraMsgData.type;
+    const isAudio = (messageType === 'ptt' || messageType === 'audio');
+    const isImage = (messageType === 'image');
+    
+    if (isAudio) {
+      // ================================================================
+      // ⭐ AUDIO: Register placeholder FIRST, then handle async
+      // ================================================================
+      perf.log('audio_detected', `🎵 Audio message detected - registering placeholder`);
       this.processAudioMessage = true;
-      await this.handleAudioMessage(conversation, [...queue], agent);
+      
+      // ⭐ CRITICAL: Use MongoDB _id (passed from webhookRoutes after save)
+      if (!messageData._id) {
+        console.error(`❌ messageData._id is missing - placeholder system will not work correctly`);
+        console.error(`messageData:`, { msg_foreign_id: messageData.msg_foreign_id, hasFileStorage: !!messageData.fileStorage });
+      }
+      
+      const audioMessageId = messageData._id ? messageData._id.toString() : messageData.msg_foreign_id;
+      
+      this.registerPlaceholder(
+        conversationId,
+        audioMessageId,
+        'audio',
+        messageData.timestamp
+      );
+      
+      console.log(`🔑 [${conversationId}] Registered audio placeholder with ID: ${audioMessageId}`);
+      
+      // Start async audio handling (transcription)
+      // Will call completePlaceholder when done
+      setImmediate(() => this.handleAudioMessage(conversation, [...queue], agent, messageData));
+      
+    } else if (isImage) {
+      // ================================================================
+      // ⭐ IMAGE: Register placeholder FIRST, then handle async
+      // ================================================================
+      perf.log('image_detected', `🖼️ Image message detected - registering placeholder`);
+      
+      // ⭐ CRITICAL: Use MongoDB _id (passed from webhookRoutes after save)
+      if (!messageData._id) {
+        console.error(`❌ messageData._id is missing - placeholder system will not work correctly`);
+      }
+      
+      const imageMessageId = messageData._id ? messageData._id.toString() : messageData.msg_foreign_id;
+      
+      this.registerPlaceholder(
+        conversationId, 
+        imageMessageId, 
+        'image', 
+        messageData.timestamp
+      );
+      
+      console.log(`🔑 [${conversationId}] Registered image placeholder with ID: ${imageMessageId}`);
+      
+      // Start async image processing (blob + upload)
+      // Will call completePlaceholder when done
+      setImmediate(() => this.handleImageMessage(conversation, messageData));
+      
     } else {
+      // Text message - no placeholder needed
       const queueHasTranscriptionInProgress = queue.some(item => item.transcriptionInProgress === true);
       if (!queueHasTranscriptionInProgress) {
         this.processAudioMessage = false;
       }
     }
 
-    this.resetQueueTimer(conversationId);
+    // ====================================================================
+    // ⭐ SMART DECISION TREE: Process immediately, abort, or accumulate
+    // ====================================================================
+    
+    const isCurrentlyProcessing = this.processing.has(conversationId);
+    
+    if (isCurrentlyProcessing) {
+      // SCENARIO A: New message during processing → ABORT IMMEDIATELY
+      perf.log('abort_triggered', `🚫 New message during processing - ABORTING current request`);
+      
+      await this.abortCurrentProcessing(conversationId, 'new_message_arrived');
+      
+      // ====================================================================
+      // ⭐ AFTER ABORT: Check if we should start accumulation
+      // ====================================================================
+      // If there are placeholders (audio/image processing), wait for them
+      // Otherwise, start accumulation window
+      
+      if (!this.hasPendingPlaceholders(conversationId)) {
+        this.startAccumulationWindow(conversationId);
+      } else {
+        perf.log('waiting_for_placeholders', `⏸️ Waiting for placeholders before accumulation`);
+      }
+      
+    } else {
+      // SCENARIO B: Not processing
+      
+      const hasAccumulationTimer = this.accumulationTimers.has(conversationId);
+      const hasPendingPlaceholders = this.hasPendingPlaceholders(conversationId);
+      
+      if (hasPendingPlaceholders) {
+        // SCENARIO B0: Placeholders active → Don't start timer yet
+        perf.log('placeholder_wait', `⏸️ Placeholders active - queue will wait (count: ${this.placeholders.get(conversationId)?.size || 0})`);
+        // Do nothing - completePlaceholder will trigger accumulation when ready
+        
+      } else if (hasAccumulationTimer) {
+        // SCENARIO B1: Already accumulating → Reset timer (extend window)
+        perf.log('accumulation_extended', `⏳ Extending accumulation window`);
+        this.startAccumulationWindow(conversationId); // Resets timer
+        
+      } else {
+        // SCENARIO B2: Fresh start, no placeholders
+        
+        if (queue.length === 1 && !isAudio && !isImage) {
+          // SCENARIO B2a: FIRST message (text only) → Process IMMEDIATELY
+          perf.log('immediate_processing', `⚡ FIRST message - processing IMMEDIATELY`);
+          
+          // Process on next tick (not blocking current execution)
+          setImmediate(() => this.processQueue(conversationId));
+          
+        } else {
+          // SCENARIO B2b: Multiple messages OR async operation → Start accumulation
+          perf.log('accumulation_started', `📦 Starting accumulation window`);
+          this.startAccumulationWindow(conversationId);
+        }
+      }
+    }
   }
 
   /**
    * Register a pending media operation for a conversation
-   * @param {string} conversationId - Conversation ID
-   * @param {string} mediaRequestId - Media processing request ID
    */
   addPendingMedia(conversationId, mediaRequestId) {
     if (!this.pendingMedia.has(conversationId)) {
@@ -89,14 +270,11 @@ class MessageQueue {
       totalPending: this.pendingMedia.get(conversationId).size
     });
     
-    // Set cleanup timer for this conversation's media operations
     this.setMediaCompletionTimer(conversationId);
   }
 
   /**
    * Mark a media operation as completed
-   * @param {string} conversationId - Conversation ID  
-   * @param {string} mediaRequestId - Media processing request ID
    */
   completePendingMedia(conversationId, mediaRequestId) {
     if (!this.pendingMedia.has(conversationId)) {
@@ -110,19 +288,35 @@ class MessageQueue {
       remainingPending: pendingSet.size
     });
     
-    // If all media operations are complete, reset queue timer
     if (pendingSet.size === 0) {
-      console.log(`🎯 [${conversationId}] ALL media operations completed - resetting queue timer`);
+      console.log(`🎯 [${conversationId}] ALL media operations completed`);
       this.pendingMedia.delete(conversationId);
       this.clearMediaCompletionTimer(conversationId);
-      this.resetQueueTimer(conversationId);
+      
+      // ================================================================
+      // ⭐ CRITICAL: Check BOTH processing AND placeholders
+      // ================================================================
+      // Audio: Download completes BEFORE transcription
+      // - completePendingMedia: Download done ✅
+      // - BUT placeholder still active (transcription in progress)
+      // - MUST NOT start accumulation until placeholder completes
+      
+      const isProcessing = this.processing.has(conversationId);
+      const hasPendingPlaceholders = this.hasPendingPlaceholders(conversationId);
+      
+      if (isProcessing) {
+        console.log(`⏸️ [${conversationId}] Currently processing - media completion will NOT trigger new processing`);
+      } else if (hasPendingPlaceholders) {
+        console.log(`⏸️ [${conversationId}] Placeholders still active (${this.placeholders.get(conversationId)?.size || 0}) - media completion will wait`);
+      } else {
+        console.log(`🚀 [${conversationId}] Not processing + no placeholders - starting accumulation window after media completion`);
+        this.startAccumulationWindow(conversationId);
+      }
     }
   }
 
   /**
    * Check if conversation has pending media operations
-   * @param {string} conversationId - Conversation ID
-   * @returns {boolean} True if media operations are pending
    */
   hasPendingMedia(conversationId) {
     const pendingSet = this.pendingMedia.get(conversationId);
@@ -133,14 +327,26 @@ class MessageQueue {
    * Set cleanup timer for media operations (timeout protection)
    */
   setMediaCompletionTimer(conversationId) {
-    // Clear existing timer
     this.clearMediaCompletionTimer(conversationId);
     
-    // Set new timer with timeout
     const timer = setTimeout(() => {
-      console.log(`⚠️ [${conversationId}] Media completion timeout reached - forcing queue reset`);
+      console.log(`⚠️ [${conversationId}] Media completion timeout reached - forcing queue start`);
       this.pendingMedia.delete(conversationId);
-      this.resetQueueTimer(conversationId);
+      
+      // ================================================================
+      // ⭐ CRITICAL: Check BOTH processing AND placeholders
+      // ================================================================
+      const isProcessing = this.processing.has(conversationId);
+      const hasPendingPlaceholders = this.hasPendingPlaceholders(conversationId);
+      
+      if (isProcessing) {
+        console.log(`⏸️ [${conversationId}] Currently processing - timeout will NOT trigger new processing`);
+      } else if (hasPendingPlaceholders) {
+        console.log(`⏸️ [${conversationId}] Placeholders still active - timeout will wait for completion`);
+      } else {
+        console.log(`🚀 [${conversationId}] Not processing + no placeholders - starting accumulation after media timeout`);
+        this.startAccumulationWindow(conversationId);
+      }
     }, this.mediaTimeout);
     
     this.mediaCompletionTimers.set(conversationId, timer);
@@ -156,42 +362,321 @@ class MessageQueue {
     }
   }
 
-  async handleAudioMessage(conversation, queue, agent = null) {
-    const placeholder = conversation.messages[conversation.messages.length - 1]
+  // ========================================================================
+  // ⭐ ABORT SYSTEM - Smart Cancellation
+  // ========================================================================
 
-    placeholder.audioTranscription = {
-      status: 'processing',
-      status_reason: 'handleAudioMessage received a new audio message. Placeholder created.',
-      text: { content: "" }
-    };
-
+  /**
+   * Check if abort signal is set for conversation
+   * @param {string} conversationId - Conversation ID
+   * @returns {Promise<boolean>} True if should abort
+   */
+  async checkAbortSignal(conversationId) {
     try {
-      const freshConversation = await Conversation.findById(conversation._id);
-      
-      const messageIndex = freshConversation.messages.findIndex(msg => 
-        msg.ultraMsgData && 
-        msg.ultraMsgData.id && 
-        placeholder.ultraMsgData && 
-        placeholder.ultraMsgData.id && 
-        msg.ultraMsgData.id.toString() === placeholder.ultraMsgData.id.toString()
-      );
-
-      if (messageIndex !== -1) {
-        freshConversation.messages[messageIndex] = placeholder;
-      } else {
-        console.warn('Message not found in conversation. Unable to update.');
+      if (!redisClient.isOpen) {
+        await redisClient.connect();
       }
-
-      await saveWithRetry(freshConversation);
-      conversation = freshConversation;
+      
+      const abortSignal = await redisClient.get(`abort_signal:${conversationId}`);
+      return abortSignal === 'true';
     } catch (error) {
-      console.error('Error updating conversation data:', error);
-      throw error;
+      console.error(`⚠️ Error checking abort signal:`, error.message);
+      return false; // Default to not aborting if Redis fails
+    }
+  }
+
+  /**
+   * Set abort signal for conversation
+   * @param {string} conversationId - Conversation ID
+   * @param {string} reason - Reason for abort
+   */
+  async setAbortSignal(conversationId, reason = 'new_message_arrived') {
+    try {
+      if (!redisClient.isOpen) {
+        await redisClient.connect();
+      }
+      
+      await redisClient.setEx(`abort_signal:${conversationId}`, 60, 'true'); // 60s TTL
+      console.log(`🚫 Abort signal set for ${conversationId}: ${reason}`);
+    } catch (error) {
+      console.error(`⚠️ Error setting abort signal:`, error.message);
+    }
+  }
+
+  /**
+   * Clear abort signal for conversation
+   * @param {string} conversationId - Conversation ID
+   */
+  async clearAbortSignal(conversationId) {
+    try {
+      if (!redisClient.isOpen) {
+        await redisClient.connect();
+      }
+      
+      await redisClient.del(`abort_signal:${conversationId}`);
+    } catch (error) {
+      console.error(`⚠️ Error clearing abort signal:`, error.message);
+    }
+  }
+
+  /**
+   * Abort current processing completely (OpenAI + AI message cancellation)
+   * @param {string} conversationId - Conversation ID
+   * @param {string} reason - Reason for abort
+   */
+  async abortCurrentProcessing(conversationId, reason = 'new_message_arrived') {
+    const perf = this.performanceTrackers.get(conversationId);
+    const perfStart = perf ? perf.startTime : performance.now();
+    
+    console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🛑 Aborting processing for: ${conversationId}`);
+    
+    const processingContext = this.processing.get(conversationId);
+    
+    if (!processingContext) {
+      console.warn(`⚠️ No processing context found for ${conversationId}`);
+      return;
+    }
+    
+    // ====================================================================
+    // ⭐ Handle preliminary state (before OpenAI started)
+    // ====================================================================
+    if (processingContext.preliminary) {
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🔄 Aborting preliminary processing (before OpenAI)`);
+      // No OpenAI to abort, just cleanup
+    } else if (processingContext.abortController) {
+      // Full processing - abort OpenAI request
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🚫 Sending abort signal to OpenAI request`);
+      processingContext.abortController.abort();
+      processingContext.aborted = true;
+    }
+    
+    // 2. Set Redis abort signal (for checkpoints to detect)
+    await this.setAbortSignal(conversationId, reason);
+    
+    // 3. Mark AIRequest as cancelled (if exists)
+    if (processingContext.aiRequestId) {
+      try {
+        await AIRequest.findByIdAndUpdate(processingContext.aiRequestId, {
+          status: 'cancelled',
+          cancelReason: reason,
+          cancelledAt: processingContext.stage || 'unknown',
+          'timestamps.cancelled': new Date()
+        });
+        
+        console.log(`[+${Math.round(performance.now() - perfStart)}ms] ✅ AIRequest marked as cancelled: ${processingContext.aiRequestId}`);
+      } catch (error) {
+        console.error(`❌ Failed to update AIRequest:`, error.message);
+      }
+    }
+    
+    // 4. Mark AI message as cancelled (if exists)
+    if (processingContext.aiMessageId) {
+      try {
+        await Message.findByIdAndUpdate(processingContext.aiMessageId, {
+          status: 'cancelled',
+          cancelReason: reason
+        });
+        
+        console.log(`[+${Math.round(performance.now() - perfStart)}ms] ✅ AI Message marked as cancelled: ${processingContext.aiMessageId}`);
+      } catch (error) {
+        console.error(`❌ Failed to update Message status:`, error.message);
+      }
+    }
+    
+    // ⭐ 5. Clear processing context FIRST
+    this.processing.delete(conversationId);
+    
+    // ⭐ 6. Clear Redis activeRun lock LAST (prevents race condition)
+    try {
+      await redisClient.del(`activeRun:${conversationId}`);
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] 🧹 Redis lock cleared`);
+    } catch (error) {
+      console.error(`❌ Failed to clear Redis lock:`, error.message);
+    }
+    
+    console.log(`[+${Math.round(performance.now() - perfStart)}ms] ✅ Abort complete`);
+  }
+
+  /**
+   * Start pure accumulation window (300ms clean from NOW)
+   * @param {string} conversationId - Conversation ID
+   */
+  startAccumulationWindow(conversationId) {
+    const perf = this.performanceTrackers.get(conversationId);
+    const perfStart = perf ? perf.startTime : performance.now();
+    
+    // ====================================================================
+    // ⭐ CHECK: Don't start if there are pending placeholders
+    // ====================================================================
+    if (this.hasPendingPlaceholders(conversationId)) {
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⏸️ Accumulation paused - waiting for placeholders`);
+      return; // Don't start timer, wait for placeholder completion
+    }
+    
+    // Clear existing timer
+    if (this.accumulationTimers.has(conversationId)) {
+      clearTimeout(this.accumulationTimers.get(conversationId));
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⏹️ Cleared previous accumulation timer`);
+    }
+    
+    // Create NEW timer starting NOW (pure 300ms from this moment)
+    const windowStart = performance.now();
+    
+    const timer = setTimeout(() => {
+      const windowEnd = performance.now();
+      const actualWindow = windowEnd - windowStart;
+      
+      console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⏰ Accumulation window closed (actual: ${Math.round(actualWindow)}ms)`);
+      
+      this.accumulationTimers.delete(conversationId);
+      this.processQueue(conversationId);
+    }, this.ACCUMULATION_WINDOW);
+    
+    this.accumulationTimers.set(conversationId, timer);
+    console.log(`[+${Math.round(performance.now() - perfStart)}ms] ⏳ Accumulation window started (${this.ACCUMULATION_WINDOW}ms pure)`);
+  }
+
+  // ========================================================================
+  // ⭐ PLACEHOLDER SYSTEM - For Async Operations (Audio/Image)
+  // ========================================================================
+
+  /**
+   * Register a placeholder for async operation (audio transcription, image processing)
+   * @param {string} conversationId - Conversation ID
+   * @param {string} messageId - Message ID (MongoDB _id)
+   * @param {string} type - 'audio' or 'image'
+   * @param {Date} originalTimestamp - Original message timestamp for ordering
+   */
+  registerPlaceholder(conversationId, messageId, type, originalTimestamp) {
+    if (!this.placeholders.has(conversationId)) {
+      this.placeholders.set(conversationId, new Map());
+    }
+    
+    const placeholder = {
+      type: type,
+      messageId: messageId,
+      startTime: new Date(),
+      status: 'processing',
+      originalTimestamp: originalTimestamp
+    };
+    
+    this.placeholders.get(conversationId).set(messageId, placeholder);
+    
+    console.log(`🔄 [${conversationId}] Placeholder registered: ${type} for message ${messageId}`, {
+      totalPlaceholders: this.placeholders.get(conversationId).size
+    });
+  }
+
+  /**
+   * Complete a placeholder (async operation finished)
+   * @param {string} conversationId - Conversation ID
+   * @param {string} messageId - Message MongoDB _id (as string)
+   */
+  completePlaceholder(conversationId, messageId) {
+    if (!this.placeholders.has(conversationId)) {
+      console.warn(`⚠️ [${conversationId}] No placeholders found for conversation (none registered)`);
+      return;
+    }
+    
+    const placeholderMap = this.placeholders.get(conversationId);
+    
+    console.log(`🔍 [${conversationId}] Looking for placeholder ${messageId} in map with keys:`, Array.from(placeholderMap.keys()));
+    
+    const placeholder = placeholderMap.get(messageId);
+    
+    if (!placeholder) {
+      console.warn(`⚠️ [${conversationId}] Placeholder not found for message: ${messageId}`);
+      console.warn(`Available placeholders:`, Array.from(placeholderMap.keys()));
+      return;
+    }
+    
+    placeholderMap.delete(messageId);
+    
+    const duration = Date.now() - placeholder.startTime;
+    console.log(`✅ [${conversationId}] Placeholder complete: ${placeholder.type} (${duration}ms)`, {
+      remainingPlaceholders: placeholderMap.size
+    });
+    
+    // ====================================================================
+    // ⭐ If all placeholders complete, trigger accumulation window
+    // ====================================================================
+    if (placeholderMap.size === 0) {
+      console.log(`🎯 [${conversationId}] ALL placeholders complete`);
+      this.placeholders.delete(conversationId); // Cleanup
+      
+      // ================================================================
+      // ⭐ CRITICAL FIX: Only start accumulation if NOT currently processing
+      // ================================================================
+      // If conversation is currently processing, DON'T trigger accumulation
+      // This prevents aborting an already-running request
+      
+      const isProcessing = this.processing.has(conversationId);
+      
+      if (isProcessing) {
+        console.log(`⏸️ [${conversationId}] Currently processing - placeholder completion will NOT trigger new processing`);
+        // Do nothing - let current processing finish
+      } else {
+        console.log(`🚀 [${conversationId}] Not processing - starting accumulation window`);
+        this.startAccumulationWindow(conversationId);
+      }
+    }
+  }
+
+  /**
+   * Check if conversation has pending placeholders
+   * @param {string} conversationId - Conversation ID
+   * @returns {boolean} True if pending placeholders exist
+   */
+  hasPendingPlaceholders(conversationId) {
+    const placeholderMap = this.placeholders.get(conversationId);
+    return placeholderMap && placeholderMap.size > 0;
+  }
+
+  /**
+   * Expose isProcessing for external checks (webhookRoutes)
+   * @param {string} conversationId - Conversation ID
+   * @returns {boolean} True if currently processing
+   */
+  isProcessing(conversationId) {
+    return this.processing.has(conversationId);
+  }
+
+  async handleAudioMessage(conversation, queue, agent = null, messageData = null) {
+    const conversationId = conversation._id.toString();
+    
+    // Find the most recent audio message from the Message collection
+    const latestMessage = await Message.findOne({
+      conversationId: conversation._id,
+      msg_foreign_id: messageData.msg_foreign_id
+    });
+
+    if (!latestMessage) {
+      console.error('❌ Audio message not found in Message collection');
+      // Complete placeholder to prevent blocking
+      const audioMessageId = messageData._id || messageData.msg_foreign_id;
+      this.completePlaceholder(conversationId, audioMessageId);
+      return;
     }
 
+    console.log(`🎵 [${conversationId}] Starting audio transcription for message: ${latestMessage._id}`);
+
+    // Update transcription status to processing
+    latestMessage.audioTranscription = {
+      status: 'processing',
+      status_reason: 'handleAudioMessage received a new audio message. Processing started.',
+      text: []
+    };
+    await latestMessage.save();
+
+    // Find placeholder in queue
+    const placeholderIndex = queue.findIndex(msg => 
+      msg.msg_foreign_id === messageData.msg_foreign_id
+    );
+    
+    const placeholder = placeholderIndex !== -1 ? queue[placeholderIndex] : messageData;
     placeholder.transcriptionInProgress = true;
     
-    // 🚀 NEW FEATURE: Send immediate message to user when audio transcription begins
+    // Send immediate message to user when audio transcription begins
     try {
       const audioMessages = [
         "Estoy escuchando tu audio 🎧",
@@ -220,23 +705,18 @@ class MessageQueue {
       
       console.log(`📤 Sending immediate audio processing message: "${randomMessage}"`);
       
-      // FIX: Use conversation.phoneNumber instead of placeholder.from
       const phoneNumber = conversation.phoneNumber || placeholder.ultraMsgData?.from || placeholder.from;
       
       if (!phoneNumber) {
         throw new Error('Phone number not available for audio notification');
       }
       
-      // Get agent info for sending message
+      // Get agent for sending message
       if (agent) {
-        // For agent-based messages (WhatsApp Factory)
-        const { sendUltraMsg } = require('../services/ultramsgService');
         await sendUltraMsg(agent, phoneNumber, randomMessage);
       } else {
-        // For UltraMsg messages, try to get agent from conversation
-        const conversationAgent = await Agent.findByPk(conversation.agentId);
+        const conversationAgent = await Agent.findById(conversation.agentId);
         if (conversationAgent) {
-          const { sendUltraMsg } = require('../services/ultramsgService');
           await sendUltraMsg(conversationAgent, phoneNumber, randomMessage);
         }
       }
@@ -244,34 +724,23 @@ class MessageQueue {
       console.log(`✅ Audio processing notification sent to user: ${phoneNumber}`);
       
     } catch (messageError) {
-      // Non-blocking: Continue with transcription even if message fails
       console.error(`⚠️ Failed to send audio processing notification (non-blocking):`, {
         error: messageError.message,
         conversationId: conversation._id.toString(),
-        phoneNumber: conversation.phoneNumber,
-        placeholderFrom: placeholder.from,
-        ultraMsgFrom: placeholder.ultraMsgData?.from
+        phoneNumber: conversation.phoneNumber
       });
     }
     
     // Update the placeholder in the queue
-    const placeholderIndex = queue.findIndex(msg => 
-      msg.ultraMsgData && 
-      msg.ultraMsgData.id && 
-      placeholder.ultraMsgData && 
-      placeholder.ultraMsgData.id && 
-      msg.ultraMsgData.id.toString() === placeholder.ultraMsgData.id.toString()
-    );
-
     if (placeholderIndex !== -1) {
       queue[placeholderIndex] = placeholder;
     } else {
-      console.warn('Message not found in queue. Unable to update.');
+      console.warn('Message not found in queue. Adding placeholder.');
       queue.push(placeholder);
     }
 
+    // Perform audio transcription
     try {
-      // Determinar si es WhatsApp Factory y necesita descarga especial
       const isWhatsAppFactory = placeholder.provider === 'whatsapp-factory' || 
                               placeholder.whatsappFactorySource === true ||
                               (placeholder.ultraMsgData.media && placeholder.ultraMsgData.media.needsDownload);
@@ -281,21 +750,18 @@ class MessageQueue {
       if (isWhatsAppFactory && agent && placeholder.ultraMsgData.media && placeholder.ultraMsgData.media.id) {
         console.log('Processing WhatsApp Factory audio with special handling');
         
-        // Para WhatsApp Factory, obtener la URL del audio usando el servicio específico
         let audioUrl = placeholder.ultraMsgData.media.url;
         
-        // Si la URL es null o 'null' y necesita descarga, usar el servicio de WhatsApp Factory
         if ((!audioUrl || audioUrl === 'null') && placeholder.ultraMsgData.media.needsDownload) {
           console.log('WhatsApp Factory audio needs download, getting URL from service...');
           
           try {
-            // Obtener el phoneNumberId del agente
             const phoneNumberId = agent.instanceId;
             
             audioUrl = await getAudioUrl(
               placeholder.ultraMsgData.id,
               phoneNumberId,
-              agent.id
+              agent._id.toString()
             );
             
             console.log('✅ WhatsApp Factory audio URL obtained:', audioUrl ? 'Success' : 'Failed');
@@ -305,11 +771,8 @@ class MessageQueue {
           }
         }
         
-        // Transcribir usando nuestro nuevo sistema de almacenamiento seguro
-        // Para WhatsApp Factory, necesitamos crear un objeto de mensaje temporal con la URL legacy
         const messageDataForTranscription = {
           ...placeholder,
-          // Si no hay fileStorage exitoso, usar fallback legacy
           media: audioUrl || placeholder.ultraMsgData.media
         };
         
@@ -320,65 +783,61 @@ class MessageQueue {
           placeholder.ultraMsgData.id
         );
       } else {
-        // Para otros proveedores (UltraMessage), usar el método actualizado
         transcription = await transcribeAudioWithTimeout(
-          placeholder, // Pasar el mensaje completo con información de fileStorage
-          null, // No agent needed for UltraMsg
-          null, // No mediaData adicional
-          placeholder.ultraMsgData.id // messageId para tracking
+          placeholder,
+          null,
+          null,
+          placeholder.ultraMsgData.id
         );
       }
 
+      // Update message in Message collection with transcription result
       if (transcription && transcription.status === 'completed') {
-        placeholder.audioTranscription = {
+        latestMessage.audioTranscription = {
           status: 'completed',
           status_reason: 'Transcription Complete',
-          text: { content: transcription.text || "" }
+          text: [{ order: 0, content: transcription.text || "" }]
         };
+        placeholder.audioTranscription = latestMessage.audioTranscription;
       } else {
-        placeholder.audioTranscription = {
+        latestMessage.audioTranscription = {
           status: 'failed',
           status_reason: 'Transcription came null',
-          text: { content: "[Error: El audio no pudo ser procesado. Hazle saber al usuario, sin interrumpir la conversación, que no pudiste escuchar su audio ya que el equipo se encuentra aplicando mejoras en tu capacidad de escuchar. Dile que vuelva a intentarlo en un momento, o que te lo escriba si vuelve a fallar por favor, y le pides disculpas por el imprevisto. Contesta el resto de los mensajes normalmente.]" }
+          text: [{ order: 0, content: "[Error: El audio no pudo ser procesado. Hazle saber al usuario, sin interrumpir la conversación, que no pudiste escuchar su audio ya que el equipo se encuentra aplicando mejoras en tu capacidad de escuchar. Dile que vuelva a intentarlo en un momento, o que te lo escriba si vuelve a fallar por favor, y le pides disculpas por el imprevisto. Contesta el resto de los mensajes normalmente.]" }]
         };
+        placeholder.audioTranscription = latestMessage.audioTranscription;
       }
     } catch (error) {
       console.error('Error handling audio message:', error);
-      placeholder.audioTranscription = {
+      latestMessage.audioTranscription = {
         status: 'failed',
-        text: { content: "[Error: El audio no pudo ser procesado. Hazle saber al usuario, sin interrumpir la conversación, que no pudiste escuchar su audio ya que el equipo se encuentra aplicando mejoras en tu capacidad de escuchar. Dile que vuelva a intentarlo en un momento, o que te lo escriba si vuelve a fallar por favor, y le pides disculpas por el imprevisto. Contesta el resto de los mensajes normalmente.]" },
+        text: [{ order: 0, content: "[Error: El audio no pudo ser procesado. Hazle saber al usuario, sin interrumpir la conversación, que no pudiste escuchar su audio ya que el equipo se encuentra aplicando mejoras en tu capacidad de escuchar. Dile que vuelva a intentarlo en un momento, o que te lo escriba si vuelve a fallar por favor, y le pides disculpas por el imprevisto. Contesta el resto de los mensajes normalmente.]" }],
         status_reason: "Error: Audio transcription failed. " + error.message  
       };
+      placeholder.audioTranscription = latestMessage.audioTranscription;
     } finally {
       delete placeholder.transcriptionInProgress;
     }
 
+    // Save updated message to Message collection
     try {
-      const freshConversation = await Conversation.findById(conversation._id);
-      
-      const messageIndex = freshConversation.messages.findIndex(msg => 
-        msg.ultraMsgData && 
-        msg.ultraMsgData.id && 
-        placeholder.ultraMsgData && 
-        placeholder.ultraMsgData.id && 
-        msg.ultraMsgData.id.toString() === placeholder.ultraMsgData.id.toString()
-      );
-
-      if (messageIndex !== -1) {
-        freshConversation.messages[messageIndex] = placeholder;
-      } else {
-        console.warn('Message not found in conversation. Unable to update.');
-      }
-
-      await saveWithRetry(freshConversation);
-      conversation = freshConversation;
+      await latestMessage.save();
+      console.log(`✅ Audio transcription saved to Message collection: ${latestMessage._id}`);
     } catch (error) {
-      console.error('Error updating conversation data:', error);
-      throw error;
+      console.error('❌ Error saving audio transcription:', error);
+      // Continue - we'll complete placeholder anyway
     }
 
+    // ====================================================================
+    // ⭐ UPDATE REDIS CACHE with transcription (critical for correctness)
+    // ====================================================================
+    cacheMessage(conversationId, latestMessage).catch(err => {
+      console.warn(`⚠️ Failed to update Redis cache with transcription (non-blocking):`, err.message);
+    });
+    console.log(`♻️ [${conversationId}] Redis cache updated with audio transcription`);
+
     // Update the message in the queue
-    const conversationQueue = this.queues.get(conversation._id.toString());
+    const conversationQueue = this.queues.get(conversationId);
     if (conversationQueue && placeholderIndex !== -1) {
       conversationQueue[placeholderIndex] = placeholder;
     }
@@ -387,32 +846,75 @@ class MessageQueue {
 
     if (!otherActiveTranscriptions) {
       this.processAudioMessage = false;
-      this.resetQueueTimer(conversation._id.toString());
     }
 
-    console.log('Audio message handling completed');
+    // ====================================================================
+    // ⭐ COMPLETE PLACEHOLDER - Triggers accumulation if all done
+    // ====================================================================
+    const messageIdForPlaceholder = latestMessage._id.toString();
+    console.log(`🔑 [${conversationId}] Completing placeholder for audio message ID: ${messageIdForPlaceholder}`);
+    
+    this.completePlaceholder(conversationId, messageIdForPlaceholder);
+
+    console.log('✅ Audio message handling completed');
   }
 
-  resetQueueTimer(conversationId) {
-    // 🔥 CRITICAL: Check for pending media operations before resetting timer
-    if (this.hasPendingMedia(conversationId)) {
-      console.log(`⏳ [${conversationId}] Pending media operations detected - delaying queue timer reset`, {
-        pendingCount: this.pendingMedia.get(conversationId)?.size || 0
+  /**
+   * Handle image message (blob processing + upload)
+   * @param {Object} conversation - Conversation document
+   * @param {Object} messageData - Message data
+   */
+  async handleImageMessage(conversation, messageData) {
+    const conversationId = conversation._id.toString();
+    
+    try {
+      console.log(`🖼️ [${conversationId}] Starting image message handling`);
+      
+      // Find message in MongoDB
+      const imageMessage = await Message.findOne({
+        conversationId: conversation._id,
+        msg_foreign_id: messageData.msg_foreign_id
       });
-      return; // Don't reset timer until all media operations complete
+      
+      if (!imageMessage) {
+        console.error(`❌ Image message not found: ${messageData.msg_foreign_id}`);
+        this.completePlaceholder(conversationId, messageData.msg_foreign_id);
+      return;
     }
     
-    if (this.queueTimers.has(conversationId)) {
-      clearTimeout(this.queueTimers.get(conversationId));
-      console.log(`Cleared existing timer for conversation: ${conversationId}`);
+      // ================================================================
+      // ⭐ BLOB PROCESSING (if needed)
+      // ================================================================
+      // Note: If image already has blob cached, skip
+      // If not, download and cache (will be done in buildMessages later)
+      
+      console.log(`✅ [${conversationId}] Image message ready`, {
+        fileId: imageMessage.fileStorage?.fileId,
+        hasCachedBlob: !!imageMessage.fileStorage?.base64Cache?.data
+      });
+      
+      // ================================================================
+      // ⭐ COMPLETE PLACEHOLDER - Image is ready
+      // ================================================================
+      this.completePlaceholder(conversationId, imageMessage._id.toString());
+      
+    } catch (error) {
+      console.error(`❌ Error handling image message:`, error);
+      // Complete placeholder anyway to prevent blocking
+      this.completePlaceholder(conversationId, messageData.msg_foreign_id);
     }
+  }
 
-    const timer = setTimeout(() => {
-      this.processQueue(conversationId);
-    }, this.queueInterval);
-
-    this.queueTimers.set(conversationId, timer);
-    console.log(`🕐 [${conversationId}] Queue timer reset - will process in ${this.queueInterval}ms`);
+  /**
+   * DEPRECATED - Use completePlaceholder instead
+   * Old queue timer system - being phased out
+   * Kept for backward compatibility with media operations
+   */
+  resetQueueTimer(conversationId) {
+    console.warn(`⚠️ DEPRECATED: resetQueueTimer called for ${conversationId} - use completePlaceholder instead`);
+    
+    // For backward compatibility during transition, start accumulation window
+    this.startAccumulationWindow(conversationId);
   }
 
   async processQueue(conversationId) {
@@ -446,63 +948,190 @@ class MessageQueue {
   }
 
   async executeQueueProcessing(conversationId) {
+    // ====================================================================
+    // ⭐ PERFORMANCE TRACKING START (outside try block for scope)
+    // ====================================================================
+    let perf = this.performanceTrackers.get(conversationId);
+    if (!perf) {
+      perf = createTracker(conversationId);
+      this.performanceTrackers.set(conversationId, perf);
+    }
+    
+    perf.checkpoint('processing_start', { timestamp: new Date() });
+    
     try {
+      // ================================================================
+      // ⭐ ABORT CHECKPOINT 1: Before any expensive operations
+      // ================================================================
+      if (await this.checkAbortSignal(conversationId)) {
+        perf.log('abort_before_processing', `🚫 Abort signal detected - exiting early`);
+        return;
+      }
+      
       if (!redisClient.isOpen) {
         await redisClient.connect();
       }
       const isSet = await redisClient.set(`activeRun:${conversationId}`, 'true', { NX: true, EX: 300 });
       
       if (!isSet) {
-        console.log(`Active run already in progress for conversation: ${conversationId}`);
+        perf.log('processing_locked', `Active run already in progress for conversation`);
         return;
       }
+
+      // ====================================================================
+      // ⭐ ATOMIC: Set processing state IMMEDIATELY after Redis lock
+      // ====================================================================
+      // Prevents race condition where webhook arrives during setup phase
+      // Will be updated with full context later (line ~1089)
+      this.processing.set(conversationId, { 
+        preliminary: true,
+        startTime: performance.now(),
+        stage: 'initializing'
+      });
 
       const queue = this.queues.get(conversationId) || [];
       if (queue.length === 0) {
-        console.log(`Queue is empty for conversation: ${conversationId}`);
-        return;
-      }
-
-      // Clear the queue and timer immediately after starting processing
-      const processedQueue = [...queue];
-      this.queues.delete(conversationId);
-      this.queueTimers.delete(conversationId);
-
-      let conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        console.error(`Conversation not found: ${conversationId}`);
-        return;
-      }
-
-      // ✅ NEW: AI Interrupt Logic - Check for recent agent messages
-      const shouldSkipAI = this.checkAgentMessageInterrupt(conversation);
-      if (shouldSkipAI) {
-        console.log('🚫 AI processing skipped: Recent agent message detected (within 10 minutes)');
+        perf.log('queue_empty', `Queue is empty for conversation`);
+        
+        // Clean up preliminary processing state
+        this.processing.delete(conversationId);
         await redisClient.del(`activeRun:${conversationId}`);
         return;
       }
 
-      // TO DO ASAP - Implement fallback with Claude
+      // Clear the queue and timers immediately after starting processing
+      const processedQueue = [...queue];
+      
+      // ====================================================================
+      // ⭐ CRITICAL: Sort by ORIGINAL timestamp for chronological order
+      // ====================================================================
+      // This ensures messages maintain their original order even if they
+      // arrive at different times due to async operations (audio transcription, etc.)
+      
+      processedQueue.sort((a, b) => {
+        // Use originalTimestamp if available (for placeholder-tracked messages)
+        // Otherwise use regular timestamp
+        const timestampA = a.originalTimestamp || a.timestamp;
+        const timestampB = b.originalTimestamp || b.timestamp;
+        return new Date(timestampA) - new Date(timestampB);
+      });
+      
+      this.queues.delete(conversationId);
+      this.queueTimers.delete(conversationId); // Legacy
+      this.accumulationTimers.delete(conversationId); // New
+      
+      perf.log('queue_cleared', `Queue and timers cleared (chronologically ordered)`, { 
+        messageCount: processedQueue.length 
+      });
+
+      let conversation = await Conversation.findById(conversationId);
+      if (!conversation) {
+        console.error(`Conversation not found: ${conversationId}`);
+        
+        // Clean up preliminary processing state
+        this.processing.delete(conversationId);
+        await redisClient.del(`activeRun:${conversationId}`);
+        return;
+      }
+
+      // Check for recent agent messages (interrupt logic)
+      const shouldSkipAI = await this.checkAgentMessageInterrupt(conversationId);
+      if (shouldSkipAI) {
+        console.log('🚫 AI processing skipped: Recent agent message detected (within 10 minutes)');
+        
+        // ⭐ Delete processing state FIRST, lock LAST
+        this.processing.delete(conversationId);
+        await this.clearAbortSignal(conversationId);
+        
+        // Delete lock LAST
+        await redisClient.del(`activeRun:${conversationId}`);
+        return;
+      }
+
+      // Get agent from MongoDB
       let agent;
       try {
-        agent = await Agent.findByPk(conversation.agentId);
+        agent = await Agent.findById(conversation.agentId);
       } catch (dbError) {
-        if (dbError.name === 'SequelizeDatabaseError' && dbError.original?.code === 'ECONNRESET') {
-          console.warn(`⚠️ [${conversationId}] DB connection reset on Agent.findByPk. Retrying once...`);
-          await new Promise(resolve => setTimeout(resolve, 1000)); // wait 1 sec
-          agent = await Agent.findByPk(conversation.agentId); // Retry
-        } else {
-          throw dbError; // Re-throw other errors
-        }
+        console.error(`❌ [${conversationId}] Error finding agent:`, dbError.message);
+        
+        // Clean up preliminary processing state
+        this.processing.delete(conversationId);
+        await redisClient.del(`activeRun:${conversationId}`);
+        throw dbError;
       }
 
       if (!agent) {
         console.error(`Agent not found for conversation: ${conversationId}`);
+        
+        // Clean up preliminary processing state
+        this.processing.delete(conversationId);
+        await redisClient.del(`activeRun:${conversationId}`);
         return;
       }
 
-      // assistantId no longer needed for Responses API
-      console.log(`✅ [${conversationId}] Agent found: ${agent.name} (ID: ${agent.id})`);
+      perf.log('agent_found', `✅ Agent found: ${agent.name}`, { agentId: agent._id.toString() });
+
+      // ====================================================================
+      // ⭐ CREATE AI REQUEST TRACKING DOCUMENT
+      // ====================================================================
+      
+      const userMessageIds = processedQueue.map(msg => msg._id).filter(id => id);
+      
+      const aiRequest = new AIRequest({
+        conversationId: conversation._id,
+        agentId: agent._id,
+        userMessageIds: userMessageIds,
+        model: agent.modelConfig?.model || 'unknown',
+        streaming: agent.modelConfig?.streaming || false,
+        maxCompletionTokens: agent.modelConfig?.maxCompletionTokens,
+        temperature: agent.modelConfig?.temperature,
+        messageCount: processedQueue.length,
+        status: 'queued',
+        timestamps: {
+          queueStart: perf.checkpoints.find(c => c.name === 'queue_start')?.timestamp 
+                      ? new Date(Date.now() - (performance.now() - perf.checkpoints.find(c => c.name === 'queue_start').timestamp)) 
+                      : new Date(),
+          processingStart: new Date()
+        }
+      });
+      
+      await aiRequest.save();
+      
+      perf.log('ai_request_created', `📊 AIRequest created`, { 
+        aiRequestId: aiRequest._id.toString(),
+        messageCount: processedQueue.length 
+      });
+      
+      // ====================================================================
+      // ⭐ CREATE ABORT CONTROLLER & PROCESSING CONTEXT
+      // ====================================================================
+      
+      const abortController = new AbortController();
+      
+      // ====================================================================
+      // ⭐ UPDATE preliminary processing state with full context
+      // ====================================================================
+      // Preliminary state was set immediately after Redis lock (line ~980)
+      // Now update with complete context including AbortController
+      
+      const processingContext = {
+        abortController: abortController,
+        aiRequestId: aiRequest._id,
+        userMessageIds: userMessageIds,
+        startTime: performance.now(),
+        stage: 'preparing',
+        aborted: false,
+        aiMessageId: null,
+        preliminary: false  // Mark as fully initialized
+      };
+      
+      this.processing.set(conversationId, processingContext);
+      
+      perf.log('processing_context_created', `🎯 Processing context initialized with AbortController`);
+      
+      // Clear any previous abort signals
+      await this.clearAbortSignal(conversationId);
 
       // Prepare messages for OpenAI
       const openAiMessages = processedQueue.map(msg => {
@@ -512,10 +1141,11 @@ class MessageQueue {
             audioTranscription = msg.audioTranscription.text;
           } else if (Array.isArray(msg.audioTranscription.text)) {
             audioTranscription = msg.audioTranscription.text.map(chunk => chunk.content).join('');
+          } else if (msg.audioTranscription.text && msg.audioTranscription.text.content) {
+            audioTranscription = msg.audioTranscription.text.content;
           }
         }
 
-        // 🔧 DIAGNOSTIC LOG: Check file storage integration  
         console.log('🔍 DIAGNOSTIC - Message processing for OpenAI:', {
           messageId: msg.ultraMsgData.id,
           hasFileStorage: !!msg.fileStorage,
@@ -533,7 +1163,6 @@ class MessageQueue {
           media_name: msg.media?.filename || null,
           sender: msg.sender,
           message_id: msg.ultraMsgData.id,
-          // 🔧 CRITICAL FIX: Include fileStorage information for AI tools
           fileStorage: msg.fileStorage || { status: 'not_applicable' }
         };
       });
@@ -547,17 +1176,83 @@ class MessageQueue {
         })
       };
 
-      // 🧹 CLEAN LOG: Avoid logging large objects with potential blob data
-      console.log('📤 OpenAI object prepared:', {
+      perf.log('openai_object_prepared', `📤 OpenAI object prepared`, {
         messageCount: openAiMessages.length,
         participantName: conversation.participantName,
         hasSystemMessage: !!openAiObject.system_message
       });
 
-      // Process with Responses API (replaces thread/run/wait workflow)
-      const result = await openAIIntegration.processConversationMessage(conversationId, JSON.stringify(openAiObject));
+      // ====================================================================
+      // ⭐ ABORT CHECKPOINT 2: Before OpenAI request (prevent cost)
+      // ====================================================================
+      if (await this.checkAbortSignal(conversationId)) {
+        perf.log('abort_before_openai', `🚫 Abort signal detected before OpenAI - exiting`);
+        
+        await AIRequest.findByIdAndUpdate(aiRequest._id, {
+          status: 'cancelled',
+          cancelReason: 'new_message_arrived',
+          cancelledAt: 'before_openai',
+          'timestamps.cancelled': new Date()
+        });
+        
+        // ⭐ Delete processing state FIRST, lock LAST (prevents race condition)
+        this.processing.delete(conversationId);
+        await this.clearAbortSignal(conversationId);
+        
+        // Delete lock LAST
+        await redisClient.del(`activeRun:${conversationId}`);
+        return;
+      }
+      
+      // Update AI request status and stage
+      processingContext.stage = 'calling_openai';
+      await AIRequest.findByIdAndUpdate(aiRequest._id, {
+        status: 'processing',
+        'timestamps.openaiRequestStart': new Date()
+      });
+      
+      perf.checkpoint('openai_request_start', { timestamp: new Date() });
 
-      // Redis lock cleanup moved to finally block for guaranteed execution
+      // Process with Responses API (with AbortController)
+      const result = await openAIIntegration.processConversationMessage(
+        conversationId, 
+        JSON.stringify(openAiObject),
+        abortController  // ⭐ Pass abort controller
+      );
+      
+      perf.checkpoint('openai_response_received', { 
+        timestamp: new Date(),
+        aborted: processingContext.aborted 
+      });
+      
+      // ====================================================================
+      // ⭐ HANDLE ABORTED REQUEST
+      // ====================================================================
+      if (result.aborted || processingContext.aborted) {
+        perf.log('openai_request_aborted', `🚫 OpenAI request was aborted`);
+        
+        await AIRequest.findByIdAndUpdate(aiRequest._id, {
+          status: 'cancelled',
+          cancelReason: 'new_message_arrived',
+          cancelledAt: 'during_openai',
+          'timestamps.cancelled': new Date(),
+          'timestamps.openaiResponseReceived': new Date()
+        });
+        
+        // ================================================================
+        // ⭐ CRITICAL: Delete processing state FIRST, lock LAST
+        // ================================================================
+        // Ensures complete cleanup before allowing new processing
+        this.processing.delete(conversationId);
+        await this.clearAbortSignal(conversationId);
+        
+        perf.log('cleanup_after_abort', `✅ Cleanup complete after abort`);
+        
+        // Delete Redis lock LAST (after all cleanup complete)
+        await redisClient.del(`activeRun:${conversationId}`);
+        
+        return;
+      }
 
       // Process the AI response
       if (result.type === 'message') {
@@ -570,13 +1265,90 @@ class MessageQueue {
             contentLength: result.content?.length || 0,
             contentPreview: result.content?.substring(0, 200) || 'empty'
           });
-          // To Do: Implement solution to handle invalid JSON in AI response.
+          
+          // DEFENSIVE PARSING: Handle multiple JSON objects concatenated by newlines
+          // This can happen when AI generates multiple response objects in one turn
+          console.log(`🔄 [${conversationId}] Attempting defensive JSON parsing (multiple objects detected)`);
+          
+          try {
+            // Split by newlines and try to parse each line as separate JSON
+            const lines = result.content.trim().split('\n').filter(line => line.trim().length > 0);
+            
+            if (lines.length > 1) {
+              console.log(`📦 [${conversationId}] Found ${lines.length} JSON objects, using the LAST one (most recent)`);
+              
+              // Parse all valid JSON objects
+              const parsedObjects = [];
+              for (const line of lines) {
+                try {
+                  const parsed = JSON.parse(line);
+                  parsedObjects.push(parsed);
+                } catch (lineError) {
+                  console.warn(`⚠️ [${conversationId}] Skipping invalid JSON line:`, line.substring(0, 100));
+                }
+              }
+              
+              if (parsedObjects.length > 0) {
+                // Use the last valid JSON object (most recent state)
+                aiResponse = parsedObjects[parsedObjects.length - 1];
+                console.log(`✅ [${conversationId}] Successfully recovered using last JSON object (timestamp: ${aiResponse.timestamp})`);
+              } else {
+                throw new Error('No valid JSON objects found after line-by-line parsing');
+              }
+            } else {
+              // Single line but still invalid JSON
+          throw jsonError;
+        }
+          } catch (recoveryError) {
+            console.error(`❌ [${conversationId}] Defensive parsing failed:`, recoveryError.message);
+            throw jsonError; // Re-throw original error
+          }
         }
         
-        const { timestamp, thinking, ai_system_message, response } = aiResponse;
+        const { timestamp, thinking, ai_system_message, response, images_observed } = aiResponse;
+
+        // ====================================================================
+        // ⭐ EXTRACT AND SAVE AI IMAGE OBSERVATIONS (Performance Optimization)
+        // ====================================================================
+        // AI provides visual descriptions of images to enable future context without blobs
+        // Saves 3-5s per request and ~1000 tokens per image on subsequent requests
+        
+        if (images_observed && Array.isArray(images_observed) && images_observed.length > 0) {
+          console.log(`🎨 [${conversationId}] AI observed ${images_observed.length} images - saving observations`);
+          
+          for (const observation of images_observed) {
+            try {
+              // Find the message by message_id
+              const userMessage = await Message.findOne({
+                conversationId: conversation._id,
+                msg_foreign_id: observation.message_id
+              });
+              
+              if (userMessage && userMessage.fileStorage?.fileId) {
+                // Save AI's observation to message
+                await Message.findByIdAndUpdate(userMessage._id, {
+                  'fileStorage.aiObservation': {
+                    metadetails: observation.metadetails,
+                    visualDescription: observation.visual_description,
+                    observedAt: new Date(),
+                    modelUsed: agent.modelConfig?.model || 'unknown'
+                  }
+                });
+                
+                console.log(`💾 [${conversationId}] Saved AI observation for message: ${observation.message_id}`);
+              } else {
+                console.warn(`⚠️ [${conversationId}] Message not found for observation: ${observation.message_id}`);
+              }
+            } catch (obsError) {
+              console.error(`⚠️ Failed to save AI observation (non-blocking):`, obsError.message);
+              // Continue - observation saving is optimization, not critical path
+            }
+          }
+        }
 
         // Create a new message object for the AI response
-        const newMessage = {
+        const newMessageData = {
+          conversationId: conversation._id,
           sender: 'ai_agent',
           content: chunkMessage(response.message).map((chunk, index) => ({ order: index, content: chunk })),
           timestamp: moment.tz(timestamp, 'America/Argentina/Buenos_Aires').utc().toDate(),
@@ -587,54 +1359,102 @@ class MessageQueue {
           type: 'chat'
         };
 
-        // 🔥 NEW ARCHITECTURE: Add tool context to AI message if tools were used
+        // Add tool context to AI message if tools were used
         if (result.hasTools && result.toolCalls && result.toolCalls.length > 0) {
           console.log(`💾 [${conversationId}] Adding tool context to AI message: ${result.toolCalls.length} tools used`);
           
-          // Calculate success/error counts
           const successCount = (result.toolResults || []).filter(r => !r.error).length;
           const errorCount = (result.toolResults || []).filter(r => r.error).length;
           
-          // Build OpenAI-compatible tool context for perfect reconstruction
-          newMessage.openaiToolContext = {
-            // Exact OpenAI tool_calls format (as received from OpenAI)
+          newMessageData.openaiToolContext = {
             tool_calls: result.toolCalls.map(call => ({
               id: call.id,
               type: call.type || 'function',
               function: {
                 name: call.function.name,
-                arguments: call.function.arguments // Keep as JSON string (OpenAI format)
+                arguments: call.function.arguments
               }
             })),
-            
-            // Exact OpenAI tool results format (for context reconstruction)
             tool_results: (result.toolResults || []).map(toolResult => ({
               tool_call_id: toolResult.tool_call_id,
               role: 'tool',
-              content: toolResult.output // Keep as string (OpenAI expects string content)
+              content: toolResult.output
             })),
-            
-            // Metadata for debugging and audit trail
             execution_metadata: {
               timestamp: new Date(),
               total_tools: result.toolCalls.length,
               success_count: successCount,
               error_count: errorCount,
-              processing_time_ms: 0 // Will be calculated if needed
+              processing_time_ms: 0
             }
           };
           
-          console.log(`✅ [${conversationId}] Tool context added to AI message successfully`, {
+          console.log(`✅ [${conversationId}] Tool context added to AI message`, {
             toolCount: result.toolCalls.length,
             successCount,
             errorCount
           });
         }
 
-        // Add the AI response to the conversation
-        conversation.messages.push(newMessage);
+        // === CRITICAL CHANGE: Save AI message to Message collection ===
+        const aiMessage = new Message(newMessageData);
+        await aiMessage.save();
+        
+        perf.log('ai_message_saved', `✅ AI message saved to Message collection`, { 
+          aiMessageId: aiMessage._id.toString() 
+        });
+        
+        // ====================================================================
+        // ⭐ CACHE AI MESSAGE IN REDIS (for sub-ms access)
+        // ====================================================================
+        cacheMessage(conversationId, aiMessage).catch(err => {
+          console.warn(`⚠️ Failed to cache AI message in Redis (non-blocking):`, err.message);
+        });
+        
+        // Store AI message ID in processing context
+        processingContext.aiMessageId = aiMessage._id;
+        processingContext.stage = 'message_saved';
+        
+        // ====================================================================
+        // ⭐ ABORT CHECKPOINT 3: After OpenAI, BEFORE sending to user (CRITICAL)
+        // ====================================================================
+        // This is the "perfeccionista" checkpoint - prevents sending stale messages
+        
+        if (await this.checkAbortSignal(conversationId)) {
+          perf.log('abort_after_openai_before_send', `🚫 CRITICAL ABORT: Message generated but NOT sending (new message arrived)`);
+          
+          // Mark AI message as cancelled (not sent)
+          aiMessage.status = 'cancelled';
+          aiMessage.cancelReason = 'new_message_arrived';
+          await aiMessage.save();
+          
+          // Update AIRequest
+          await AIRequest.findByIdAndUpdate(aiRequest._id, {
+            status: 'cancelled',
+            cancelReason: 'new_message_arrived',
+            cancelledAt: 'after_openai_before_send',
+            aiMessageId: aiMessage._id,
+            'timestamps.cancelled': new Date(),
+            'timestamps.openaiResponseReceived': new Date()
+          });
+          
+          // ⭐ Delete processing state FIRST, lock LAST (prevents race condition)
+          this.processing.delete(conversationId);
+          await this.clearAbortSignal(conversationId);
+          
+          perf.log('perfeccionista_abort_complete', `✅ Message cancelled before send - cleanup complete`);
+          
+          // Delete lock LAST
+          await redisClient.del(`activeRun:${conversationId}`);
+          return;
+        }
+        
+        perf.log('abort_check_passed', `✅ No abort signal - proceeding to send message`);
+
+        // Update conversation metadata
+        conversation.messageCount = (conversation.messageCount || 0) + 1;
         conversation.lastMessage = response.message;
-        conversation.lastMessageTime = newMessage.timestamp;
+        conversation.lastMessageTime = newMessageData.timestamp;
         conversation.lastMessageSender = {
           role: 'ai_agent',
           name: conversation.agentName
@@ -642,12 +1462,12 @@ class MessageQueue {
 
         try {
           conversation = await saveWithRetry(conversation, 3);
+          perf.log('conversation_updated', `✅ Conversation metadata updated`);
         } catch (error) {
-          console.error('Error saving conversation:', error);
+          console.error('❌ Error saving conversation:', error);
         }
 
-        // 🧹 CLEAN LOG: Avoid logging full result object with potential blob data
-        console.log('✅ AI processing completed:', {
+        perf.log('ai_processing_completed', `✅ AI processing completed`, {
           type: result.type,
           hasContent: !!result.content,
           contentLength: result.content?.length || 0,
@@ -658,6 +1478,9 @@ class MessageQueue {
 
         // Send the message via appropriate service based on agent type
         if (response.recipient === 'user') {
+          perf.checkpoint('message_send_start', { timestamp: new Date() });
+          processingContext.stage = 'sending_message';
+          
           try {
             let messageResponse;
             
@@ -681,22 +1504,22 @@ class MessageQueue {
                   }
                 }
               } else {
-                // If there are no messages to quote, send the response directly
                 messageResponse = await sendWhatsAppBusinessMessage(agent, conversation.phoneNumber, response.message);
               }
 
               if (messageResponse && messageResponse.success) {
-                newMessage.status = 'sent';
-                newMessage.whatsappBusinessData = messageResponse.data;
+                aiMessage.status = 'sent';
+                aiMessage.whatsappBusinessData = messageResponse.data;
+                await aiMessage.save();
               } else {
                 throw new Error('Invalid response from WhatsApp Factory API');
               }
               
             } else {
-              // Usar UltraMessage (comportamiento original)
+              // Usar UltraMessage
               
               if (result.messagesToQuote && result.messagesToQuote.length > 0) {
-                // 🔧 SMART QUOTED RESPONSE: Handle images in quoted responses
+                // Handle images in quoted responses
                 const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => 
                   tool.result && tool.result.generatedImages && tool.result.generatedImages.length > 0
                 );
@@ -708,7 +1531,6 @@ class MessageQueue {
                     const isLastMessage = i === uniqueMessagesToQuote.length - 1;
                     
                     if (isLastMessage && hasGeneratedImages) {
-                      // Last message with images - use smart sending
                       const imageToolResult = result.toolResults.find(tool => {
                         try {
                           const parsedOutput = JSON.parse(tool.output);
@@ -734,7 +1556,6 @@ class MessageQueue {
                           `queue-${conversation._id}`
                         );
                         
-                          // Format response for compatibility
                           const firstDelivery = sequentialResult[0];
                           messageResponse = firstDelivery?.result || { sent: 'false', message: 'Sequential delivery failed' };
                           
@@ -746,7 +1567,6 @@ class MessageQueue {
                         messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message, messageToQuote);
                       }
                     } else {
-                      // Regular quoted message
                       const messageContent = isLastMessage ? response.message : "☝🏽";
                       messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, messageContent, messageToQuote);
                     }
@@ -757,7 +1577,7 @@ class MessageQueue {
                   }
                 }
               } else {
-                // 🔧 SMART RESPONSE ROUTING: Check if response contains generated content (images or videos)
+                // Check if response contains generated content (images or videos)
                 const hasGeneratedImages = result.toolResults && result.toolResults.some(tool => {
                   try {
                     const parsedOutput = JSON.parse(tool.output);
@@ -768,33 +1588,12 @@ class MessageQueue {
                   }
                 });
                 
-                // 🔍 DIAGNOSTIC: Show image detection results
                 console.log(`🔍 [${conversationId}] Image detection analysis:`, {
                   hasGeneratedImages,
-                  toolResultsCount: result.toolResults?.length || 0,
-                  toolResults: result.toolResults?.map(tool => {
-                    try {
-                      const parsed = JSON.parse(tool.output);
-                      return {
-                        toolCallId: tool.tool_call_id,
-                        hasResult: !!parsed.result,
-                        hasGeneratedImages: !!(parsed.result?.generatedImages?.length),
-                        imageCount: parsed.result?.generatedImages?.length || 0
-                      };
-                    } catch (e) {
-                      return { toolCallId: tool.tool_call_id, parseError: true };
-                    }
-                  }) || []
+                  toolResultsCount: result.toolResults?.length || 0
                 });
                 
                 const hasGeneratedVideo = result.toolResults && result.toolResults.some(tool => {
-                  console.log('🔍 [VIDEO-TRACE] Checking tool result for video (destructured):', {
-                    toolKeys: Object.keys(tool),
-                    hasVideoUrl: !!tool.video_url,
-                    hasDownloadUrl: !!tool.download_url,
-                    success: tool.success,
-                    toolCallId: tool.tool_call_id
-                  });
                   return tool.video_url || tool.download_url;
                 });
 
@@ -806,35 +1605,16 @@ class MessageQueue {
                 if (hasGeneratedVideo) {
                   console.log(`🎥 [ULTRAMSG] Response contains generated video, using video delivery`);
                   
-                  // Extract video content from tool results (destructured format)
                   const videoToolResult = result.toolResults.find(tool => {
-                    console.log('🔍 [VIDEO-TRACE] Found video tool result (destructured):', {
-                      hasVideoUrl: !!tool.video_url,
-                      hasDownloadUrl: !!tool.download_url,
-                      videoUrlLength: tool.video_url?.length || 0,
-                      downloadUrlLength: tool.download_url?.length || 0
-                    });
                     return tool.video_url || tool.download_url;
                   });
                   
                   if (videoToolResult) {
                     try {
-                      // Tool result is already destructured, no need to parse
                       const videoUrl = videoToolResult.download_url || videoToolResult.video_url;
                       const videoCaption = response.message || videoToolResult.message || '';
                       
-                      console.log(`🎥 [ULTRAMSG] Sending generated video:`, {
-                        hasVideoUrl: !!videoUrl,
-                        captionLength: videoCaption.length,
-                        executionTime: videoToolResult.execution_time
-                      });
-                      
-                      console.log('🎬 [VIDEO-TRACE] About to send video via UltraMsg:', {
-                        agentId: agent.id,
-                        phoneNumber: conversation.phoneNumber,
-                        videoUrl: videoUrl?.substring(0, 80) + (videoUrl?.length > 80 ? '...' : ''),
-                        captionLength: videoCaption.length
-                      });
+                      console.log(`🎥 [ULTRAMSG] Sending generated video`);
                       
                       messageResponse = await sendUltraMsgVideo(
                         agent, 
@@ -847,15 +1627,10 @@ class MessageQueue {
                         }
                       );
                       
-                      console.log('✅ [VIDEO-TRACE] Generated video sent successfully via UltraMsg:', {
-                        responseId: messageResponse?.data?.id || messageResponse?.id,
-                        status: messageResponse?.data?.sent || messageResponse?.sent,
-                        hasDataWrapper: !!messageResponse?.data
-                      });
+                      console.log('✅ [VIDEO-TRACE] Generated video sent successfully');
                       
                     } catch (videoError) {
                       console.error('❌ Failed to send generated video, falling back to text:', videoError.message);
-                      // Fallback to text message
                       messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
                     }
                   }
@@ -863,7 +1638,6 @@ class MessageQueue {
                 } else if (hasGeneratedImages) {
                   console.log(`🖼️ [ULTRAMSG] Response contains generated images, using smart sending`);
                   
-                  // Extract image content from tool results
                   const imageToolResult = result.toolResults.find(tool => {
                     try {
                       const parsedOutput = JSON.parse(tool.output);
@@ -890,7 +1664,6 @@ class MessageQueue {
                         `queue-${conversation._id}`
                       );
                       
-                      // Format response for compatibility with existing flow
                       const successfulDeliveries = sequentialResult.filter(d => d.result.sent === 'true');
                       if (successfulDeliveries.length > 0) {
                         messageResponse = successfulDeliveries[0].result;
@@ -903,42 +1676,110 @@ class MessageQueue {
                       messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
                     }
                   } else {
-                    // Fallback to regular text if image extraction fails
                     messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
                   }
                 } else {
-                // No images, send text normally
+                  // No images or videos, send text normally
                 console.log(`📝 [ULTRAMSG] Text-only response, using regular sending`);
                 messageResponse = await sendUltraMsg(agent, conversation.phoneNumber, response.message);
+                }
               }
               }
 
               if (messageResponse && messageResponse.data) {
-                newMessage.status = 'sent';
-                newMessage.ultraMsgData = messageResponse.data;
-              } else {
-                throw new Error('Invalid response from sendUltraMsg');
+              aiMessage.status = 'sent';
+              aiMessage.ultraMsgData = messageResponse.data;
+              await aiMessage.save();
+              
+              perf.checkpoint('message_send_complete', { timestamp: new Date() });
+              perf.log('message_sent', `✅ AI message status updated to sent`);
+              
+              // ============================================================
+              // ⭐ UPDATE AI REQUEST WITH TOKEN DATA & COMPLETION
+              // ============================================================
+              
+              // Extract token data from result if available
+              const tokenData = result.tokens || {};
+              
+              await AIRequest.findByIdAndUpdate(aiRequest._id, {
+                status: 'completed',
+                aiMessageId: aiMessage._id,
+                'timestamps.messageSendComplete': new Date(),
+                'timestamps.completed': new Date(),
+                'tokens': tokenData,
+                finishReason: result.finishReason || 'stop',
+                openaiResponseId: result.openaiResponseId
+              });
+              
+              // Calculate durations
+              const updatedRequest = await AIRequest.findById(aiRequest._id);
+              if (updatedRequest) {
+                updatedRequest.calculateDurations();
+                await updatedRequest.save();
               }
+              
+              perf.log('ai_request_completed', `📊 AIRequest updated with completion data`);
+              
+              } else {
+              throw new Error('Invalid response from message service');
             }
           } catch (error) {
-            console.error(`Failed to send message via ${agent.type === 'wpp-bsp' ? 'WhatsApp Factory API' : 'UltraMessage'}:`, error);
-            newMessage.status = 'failed';
-            newMessage.errorData = error.message;
+            console.error(`❌ Failed to send message via ${agent.type === 'wpp-bsp' ? 'WhatsApp Factory API' : 'UltraMessage'}:`, error);
+            aiMessage.status = 'failed';
+            aiMessage.errorData = error.message;
+            await aiMessage.save();
           }
-
-          await saveWithRetry(conversation, 3); // Using saveWithRetry with 3 retries
-
-          // Pure API - no real-time AI response events
         }
-
-        // Pure API - no real-time conversation update events
       }
 
-      console.log(`Queue processed successfully for conversation: ${conversationId}`);
+      // Log completion (perf already declared at function start)
+      if (perf) {
+        perf.log('queue_processing_complete', `✅ Queue processed successfully`);
+        perf.logTimeline(); // Log complete timeline
+      } else {
+      console.log(`✅ Queue processed successfully for conversation: ${conversationId}`);
+      }
+      
+      // ⭐ Clear performance tracker (other cleanup in finally block)
+      this.performanceTrackers.delete(conversationId);
+      
     } catch (error) {
-      console.error(`Error processing queue for conversation ${conversationId}:`, error);
+      console.error(`❌ Error processing queue for conversation ${conversationId}:`, error);
+      
+      // Mark AIRequest as failed if it exists
+      const processingContext = this.processing.get(conversationId);
+      if (processingContext?.aiRequestId) {
+        try {
+          await AIRequest.findByIdAndUpdate(processingContext.aiRequestId, {
+            status: 'failed',
+            'error.message': error.message,
+            'error.code': error.code,
+            'error.stack': error.stack,
+            'error.timestamp': new Date()
+          });
+        } catch (updateError) {
+          console.error(`❌ Failed to update AIRequest on error:`, updateError.message);
+        }
+      }
+      
     } finally {
-      // 🔧 CRITICAL FIX: Always cleanup Redis lock in finally block
+      // ====================================================================
+      // ⭐ CRITICAL: Cleanup Order to Prevent Race Conditions
+      // ====================================================================
+      // 1. Delete processing state FIRST
+      // 2. Clear abort signals
+      // 3. Delete Redis lock LAST
+      // This ensures no new processQueue can start while cleanup is in progress
+      
+      // 1. Cleanup processing context and signals FIRST
+      this.processing.delete(conversationId);
+      try {
+        await this.clearAbortSignal(conversationId);
+      } catch (signalError) {
+        console.error(`❌ Error clearing abort signal:`, signalError.message);
+      }
+
+      // 2. Clear Redis lock LAST (prevents race condition)
       try {
         if (!redisClient.isOpen) {
           await redisClient.connect();
@@ -950,6 +1791,7 @@ class MessageQueue {
         console.error(`❌ Error cleaning up Redis lock:`, cleanupError.message);
       }
 
+      // 3. Schedule retry if queue has more messages
       if (this.queues.has(conversationId) && this.queues.get(conversationId).length > 0) {
         this.scheduleRetry(conversationId);
       }
@@ -964,43 +1806,38 @@ class MessageQueue {
    * Checks if AI processing should be interrupted due to recent agent message.
    * Agent messages within 10 minutes interrupt AI to allow human agent control.
    * 
-   * @param {Object} conversation MongoDB conversation object
-   * @returns {boolean} True if AI should be skipped
+   * @param {string} conversationId - Conversation ID
+   * @returns {Promise<boolean>} True if AI should be skipped
    */
-  checkAgentMessageInterrupt(conversation) {
+  async checkAgentMessageInterrupt(conversationId) {
     try {
-      if (!conversation.messages || conversation.messages.length === 0) {
-        return false; // No messages, proceed with AI
-      }
+      // Query Message collection for most recent agent message
+      const mostRecentAgentMessage = await Message.findOne({
+        conversationId: conversationId,
+        sender: 'agent'
+      }).sort({ timestamp: -1 }).limit(1);
       
-      // ✅ FIX: Find the MOST RECENT agent message (not just last message)
-      const agentMessages = conversation.messages.filter(msg => msg.sender === 'agent');
-      
-      if (agentMessages.length === 0) {
+      if (!mostRecentAgentMessage) {
         console.log('✅ TRACE: No agent messages found, AI processing allowed');
-        return false; // No agent messages, proceed with AI
+        return false;
       }
       
-      // Get the most recent agent message
-      const mostRecentAgentMessage = agentMessages[agentMessages.length - 1];
       console.log('🔍 TRACE: Checking most recent agent message for interrupt:', {
+        messageId: mostRecentAgentMessage._id,
         sender: mostRecentAgentMessage.sender,
-        timestamp: mostRecentAgentMessage.timestamp,
-        agentName: mostRecentAgentMessage.agentName,
-        isAgentMessage: mostRecentAgentMessage.isAgentMessage,
-        totalAgentMessages: agentMessages.length
+        timestamp: mostRecentAgentMessage.timestamp
       });
       
       // Check if most recent agent message is within 10 minutes
       const now = new Date();
       const messageTime = new Date(mostRecentAgentMessage.timestamp);
       const timeDifference = now - messageTime;
-      const tenMinutesInMs = 10 * 60 * 1000; // 10 minutes in milliseconds
+      const tenMinutesInMs = 10 * 60 * 1000;
       
       const isRecent = timeDifference < tenMinutesInMs;
       const minutesAgo = Math.floor(timeDifference / (60 * 1000));
       
-      console.log('🔍 TRACE: Most recent agent message timing analysis:', {
+      console.log('🔍 TRACE: Agent message timing analysis:', {
         messageTime: messageTime.toISOString(),
         currentTime: now.toISOString(),
         timeDifferenceMs: timeDifference,
@@ -1010,15 +1847,15 @@ class MessageQueue {
       });
       
       if (isRecent) {
-        console.log(`🚫 AGENT INTERRUPT: Most recent agent message is ${minutesAgo} minutes old (<10 min), skipping AI processing`);
-        return true; // Skip AI processing
+        console.log(`🚫 AGENT INTERRUPT: Agent message is ${minutesAgo} minutes old (<10 min), skipping AI processing`);
+        return true;
       } else {
         console.log(`✅ AGENT TIMEOUT: Agent message is ${minutesAgo} minutes old (>10 min), AI processing allowed`);
-        return false; // Agent message too old, proceed with AI
+        return false;
       }
       
     } catch (error) {
-      console.error('Error checking agent message interrupt:', error.message);
+      console.error('❌ Error checking agent message interrupt:', error.message);
       return false; // On error, proceed with AI (safe default)
     }
   }

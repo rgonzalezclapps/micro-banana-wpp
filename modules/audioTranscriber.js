@@ -8,10 +8,13 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const ffprobePath = require('ffprobe-static').path;
 ffmpeg.setFfmpegPath(ffmpegPath);
-const { openai } = require('../modules/openaiIntegration');
+const { OpenAI } = require('openai'); // ⭐ FIX: Import OpenAI directly
 const tmp = require('tmp');
 const { getAudioUrl } = require('../services/whatsappFactoryMediaService');
 const { createMediaClient } = require('../services/whatsappFactoryApiService');
+
+// ⭐ Create OpenAI client for audio transcription
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const AUDIO_TRANSCRIPTION_TIMEOUT = 600000; // 10 minutes in milliseconds
 

@@ -11,9 +11,10 @@ const Schema = mongoose.Schema;
 
 const PaymentSchema = new Schema({
     participantId: {
-        type: Number,
+        type: Schema.Types.ObjectId,
+        ref: 'Participant',
         required: true,
-        index: true // Refers to ParticipantProfile.participantId
+        index: true
     },
     amount: {
         type: Number,
@@ -80,11 +81,41 @@ PaymentSchema.statics.findByIdempotencyKey = async function(idempotencyKey) {
 };
 
 /**
- * Mark payment as credited
+ * Find payment by external reference
+ */
+PaymentSchema.statics.findByExternalReference = async function(externalReference) {
+    return this.findOne({ externalReference });
+};
+
+/**
+ * Mark payment as approved
+ */
+PaymentSchema.methods.markAsApproved = function(metadata = {}) {
+    this.status = 'approved';
+    this.approvedAt = new Date();
+    this.metadata = { ...this.metadata, ...metadata };
+    return this.save();
+};
+
+/**
+ * Mark payment as credited (credits added to participant)
  */
 PaymentSchema.methods.markAsCredited = function() {
     this.status = 'credited';
     this.creditedAt = new Date();
+    return this.save();
+};
+
+/**
+ * Mark payment as rejected
+ */
+PaymentSchema.methods.markAsRejected = function(reason = '') {
+    this.status = 'rejected';
+    this.metadata = { 
+        ...this.metadata, 
+        rejectedAt: new Date(),
+        rejectionReason: reason 
+    };
     return this.save();
 };
 

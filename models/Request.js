@@ -147,8 +147,9 @@ const RequestSchema = new Schema({
     ref: 'Conversation'
   },
   participantId: {
-    type: Number,
-    required: true // Reference to MongoDB ParticipantProfile.participantId
+    type: Schema.Types.ObjectId,
+    ref: 'Participant',
+    required: true
   },
   participantName: {
     type: String,

@@ -30,17 +30,19 @@ class OpenAIIntegration {
      * @param {string} message - User message to process
      * @returns {Object} AI response with tool results
      */
-    async processConversationMessage(conversationId, message) {
+    async processConversationMessage(conversationId, message, abortController = null) {
         console.log(`🤖 [${conversationId}] Processing message with Responses API`);
 
         try {
             // Process using ResponsesClient (handles streaming, tools, schema from MongoDB)
-            const result = await this.responsesClient.generateResponse(conversationId, message);
+            // ⭐ Pass abortController for cancellation capability
+            const result = await this.responsesClient.generateResponse(conversationId, message, abortController);
 
             console.log(`✅ [${conversationId}] Message processed successfully`, {
                 hasTools: result.hasTools,
                 toolCount: result.toolCalls.length,
-                responseLength: result.content.length
+                responseLength: result.content?.length || 0,
+                aborted: result.aborted || false
             });
 
             return {
@@ -49,6 +51,10 @@ class OpenAIIntegration {
                 toolCalls: result.toolCalls || [],      // Original OpenAI tool calls
                 toolResults: result.toolResults || [],  // Tool execution results
                 hasTools: result.hasTools || false,     // Whether tools were used
+                aborted: result.aborted || false,       // ⭐ NEW: Whether request was aborted
+                tokens: result.tokens || {},            // ⭐ NEW: Token usage data
+                openaiResponseId: result.openaiResponseId,  // ⭐ NEW: OpenAI response ID
+                finishReason: result.finishReason,      // ⭐ NEW: Finish reason
                 messagesToQuote: [] // Not used in Responses API
             };
                             

@@ -161,7 +161,7 @@ async function downloadMedia(waId, phoneNumberId, agentId) {
     throw new Error('Parámetro inválido: agentId es requerido');
   }
 
-  const agent = await Agent.findByPk(agentId);
+  const agent = await Agent.findById(agentId);
   if (!agent) {
     throw new Error(`No se encontró agente con ID: ${agentId}`);
   }
