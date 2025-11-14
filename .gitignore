@@ -1,5 +1,7 @@
 node_modules
 .env
+*.env
+!.env.example
 assistant_tools/enhanced_assistant_prompt_v2.md
 .gitignore
 assistant_tools/simplified_assistant_prompt_v2.md
@@ -36,3 +38,5 @@ docs/server.md
 docs/tech_specs.md
 workbench/memory.md
 workbench/system_prd.md
+*.env
+adam.env
